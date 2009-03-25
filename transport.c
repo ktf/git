@@ -942,7 +942,8 @@ struct transport *transport_get(struct remote *remote, const char *url)
 	ret->remote = remote;
 	ret->url = url;
 
-	if (!prefixcmp(url, "rsync:")) {
+	if (remote && remote->foreign_vcs) {
+	} else if (!prefixcmp(url, "rsync:")) {
 		ret->get_refs_list = get_refs_via_rsync;
 		ret->fetch = fetch_objs_via_rsync;
 		ret->push = rsync_transport_push;
