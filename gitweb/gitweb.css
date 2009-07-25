@@ -226,26 +226,20 @@ th {
 	text-align: left;
 }
 
-/* do not change row style on hover for 'blame' view */
-tr.light,
-table.blame .light:hover {
-	background-color: #ffffff;
-}
-
-tr.dark,
-table.blame .dark:hover {
-	background-color: #f6f6f0;
-}
-
-/* currently both use the same, but it can change */
-tr.light:hover,
-tr.dark:hover {
+tr.light:hover {
 	background-color: #edece6;
 }
 
-/* boundary commits in 'blame' view */
-tr.boundary td.sha1 {
-	font-weight: bold;
+tr.dark {
+	background-color: #f6f6f0;
+}
+
+tr.dark2 {
+	background-color: #f6f6f0;
+}
+
+tr.dark:hover {
+	background-color: #edece6;
 }
 
 td {
