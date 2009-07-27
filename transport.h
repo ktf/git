@@ -116,6 +116,7 @@ int transport_disconnect(struct transport *transport);
 char *transport_anonymize_url(const char *url);
 
 /* Transport methods defined outside transport.c */
+void transport_foreign_init(struct transport *transport);
 void transport_shim_init(struct transport *transport, const char *name);
 
 #endif
