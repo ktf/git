@@ -11,6 +11,7 @@ struct foreign_data
 	struct child_process importer;
 
 	/* capabilities */
+	char *marks_filename;
 	unsigned export:1;
 	unsigned export_branch:1;
 	unsigned export_merges:1;
@@ -38,7 +39,12 @@ static void get_foreign_capabilities(struct foreign_data *fdata)
 			*eon = '\0';
 
 		/* parse features */
-		if (!strcmp(buf.buf, "export"))
+		if (!strcmp(buf.buf, "marks")) {
+			if (!eon)
+				die("Feature 'marks' requires an argument");
+			fdata->marks_filename = xstrdup(eon + 1);
+		}
+		else if (!strcmp(buf.buf, "export"))
 			fdata->export = 1;
 		else if (!strcmp(buf.buf, "export-branch"))
 			fdata->export_branch = 1;
@@ -82,6 +88,7 @@ static int disconnect_foreign(struct transport *transport)
 		write(fdata->importer.in, "\n", 1);
 		close(fdata->importer.in);
 		finish_command(&fdata->importer);
+		free(fdata->marks_filename);
 		free(fdata);
 		transport->data = NULL;
 	}
@@ -91,10 +98,13 @@ static int disconnect_foreign(struct transport *transport)
 static int fetch_refs_via_foreign(struct transport *transport,
 				  int nr_heads, struct ref **to_fetch)
 {
+	struct foreign_data *fdata;
 	struct child_process *importer;
 	struct child_process fastimport;
 	struct ref *posn;
+	struct strbuf export_marks, import_marks;
 	int i, count;
+	FILE *f;
 
 	count = 0;
 	for (i = 0; i < nr_heads; i++) {
@@ -105,12 +115,28 @@ static int fetch_refs_via_foreign(struct transport *transport,
 	}
 	if (count) {
 		importer = get_importer(transport);
+		fdata = (struct foreign_data *) transport->data;
+		strbuf_init(&export_marks, 0);
+		strbuf_init(&import_marks, 0);
 
 		memset(&fastimport, 0, sizeof(fastimport));
 		fastimport.in = importer->out;
-		fastimport.argv = xcalloc(3, sizeof(*fastimport.argv));
+		fastimport.argv = xcalloc(5, sizeof(*fastimport.argv));
 		fastimport.argv[0] = "fast-import";
 		fastimport.argv[1] = "--quiet";
+		if (fdata->marks_filename) {
+			strbuf_addf(&export_marks, "--export-marks=%s",
+				fdata->marks_filename);
+			fastimport.argv[2] = export_marks.buf;
+
+			f = fopen(fdata->marks_filename, "r");
+			if (f) {
+				strbuf_addf(&import_marks, "--import-marks=%s",
+					fdata->marks_filename);
+				fastimport.argv[3] = import_marks.buf;
+				fclose(f);
+			}
+		}
 		fastimport.git_cmd = 1;
 		start_command(&fastimport);
 
@@ -124,6 +150,8 @@ static int fetch_refs_via_foreign(struct transport *transport,
 		}
 		disconnect_foreign(transport);
 		finish_command(&fastimport);
+		strbuf_release(&export_marks);
+		strbuf_release(&import_marks);
 	}
 	for (i = 0; i < nr_heads; i++) {
 		posn = to_fetch[i];

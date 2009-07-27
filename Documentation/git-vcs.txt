@@ -65,6 +65,14 @@ there may be other restrictions on what may be exported.
 FEATURES
 --------
 
+'marks' filename::
+	Helper requires the marks from a git-fast-import run to be loaded
+	from, and saved to, the given filename. When this "feature" is
+	advertised, each git-fast-import run must load and save the
+	internal marks database (see the --import-marks and --export-marks
+	option to git-fast-import for more details) located at the given
+	filename.
+
 'export'::
 	Helper supports exporting commits, at least exporting
 	non-merge commits whose parents are not the parents of any
