@@ -8,38 +8,81 @@
 
 struct foreign_data
 {
-	struct child_process *importer;
+	struct child_process importer;
+
+	/* capabilities */
+	unsigned export:1;
+	unsigned export_branch:1;
+	unsigned export_merges:1;
 };
+
+static void get_foreign_capabilities(struct foreign_data *fdata)
+{
+	struct strbuf buf;
+	FILE *file;
+
+	write(fdata->importer.in, "capabilities\n", 13);
+
+	strbuf_init(&buf, 0);
+	file = fdopen(fdata->importer.out, "r");
+	while (1) {
+		char *eon;
+		if (strbuf_getline(&buf, file, '\n') == EOF)
+			break;
+
+		if (!*buf.buf)
+			break;
+
+		eon = strchr(buf.buf, ' ');
+		if (eon)
+			*eon = '\0';
+
+		/* parse features */
+		if (!strcmp(buf.buf, "export"))
+			fdata->export = 1;
+		else if (!strcmp(buf.buf, "export-branch"))
+			fdata->export_branch = 1;
+		else if (!strcmp(buf.buf, "export-merges"))
+			fdata->export_merges = 1;
+		else
+			die("Invalid feature '%s'", buf.buf);
+
+		strbuf_reset(&buf);
+	}
+
+	strbuf_release(&buf);
+}
 
 static struct child_process *get_importer(struct transport *transport)
 {
-	struct child_process *importer = transport->data;
-	if (!importer) {
+	struct foreign_data *fdata = (struct foreign_data *) transport->data;
+	if (!fdata) {
 		struct strbuf buf;
-		importer = xcalloc(1, sizeof(*importer));
-		importer->in = -1;
-		importer->out = -1;
-		importer->err = 0;
-		importer->argv = xcalloc(3, sizeof(*importer->argv));
+		fdata = xcalloc(1, sizeof(*fdata));
+		fdata->importer.in = -1;
+		fdata->importer.out = -1;
+		fdata->importer.err = 0;
+		fdata->importer.argv = xcalloc(3, sizeof(*fdata->importer.argv));
 		strbuf_init(&buf, 80);
 		strbuf_addf(&buf, "vcs-%s", transport->remote->foreign_vcs);
-		importer->argv[0] = buf.buf;
-		importer->argv[1] = transport->remote->name;
-		importer->git_cmd = 1;
-		start_command(importer);
-		transport->data = importer;
+		fdata->importer.argv[0] = buf.buf;
+		fdata->importer.argv[1] = transport->remote->name;
+		fdata->importer.git_cmd = 1;
+		start_command(&fdata->importer);
+		get_foreign_capabilities(fdata);
+		transport->data = fdata;
 	}
-	return importer;
+	return &fdata->importer;
 }
 
 static int disconnect_foreign(struct transport *transport)
 {
-	struct child_process *importer = transport->data;
-	if (importer) {
-		write(importer->in, "\n", 1);
-		close(importer->in);
-		finish_command(importer);
-		free(importer);
+	struct foreign_data *fdata = (struct foreign_data *) transport->data;
+	if (fdata) {
+		write(fdata->importer.in, "\n", 1);
+		close(fdata->importer.in);
+		finish_command(&fdata->importer);
+		free(fdata);
 		transport->data = NULL;
 	}
 	return 0;

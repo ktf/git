@@ -33,10 +33,10 @@ The output of each command must be produced on the helper's standard output.
 The helper's standard error stream can be used for status/progress messages.
 
 'capabilities'::
-	Outputs a single line with a list of feature names separated
-	by spaces. Each of these indicates a supported feature of the
-	helper, and the caller will only attempt operations that are
-	supported.
+	Outputs a list of feature names, one per line. Each of these
+	indicates a supported feature of the helper, and the caller
+	will only attempt operations that are supported.
+	The output list shall be terminated with a blank line.
 
 'list'::
 	Outputs the names of refs, one per line. These may be
