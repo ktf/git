@@ -22,13 +22,15 @@ capabilities (limited both by the particular helper and by the
 capabilities of the system they connect to), and they report what
 capabilities they support.
 
-These programs can store refs in refs/<system>/*, and arbitrary
-information in info/<system>.
+These programs can store refs in refs/<system>/*, note refs in
+refs/notes/<system>/*, and arbitrary information in info/<system>/*.
 
 COMMANDS
 --------
 
 Commands are given by the caller on the helper's standard input, one per line.
+The output of each command must be produced on the helper's standard output.
+The helper's standard error stream can be used for status/progress messages.
 
 'capabilities'::
 	Outputs a single line with a list of feature names separated
@@ -45,6 +47,7 @@ Commands are given by the caller on the helper's standard input, one per line.
 	operations, such as importing the content, to see whether it
 	matches.) Other information, not yet supported, may be output
 	as well, separated by single spaces.
+	The output list shall be terminated with a blank line.
 
 'import' ref::
 	Imports the given ref by outputting it in git-fast-import
