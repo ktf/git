@@ -75,6 +75,7 @@ my $patch_mode;
 my $patch_mode_revision;
 
 sub apply_patch;
+sub apply_patch_for_checkout_commit;
 
 my %patch_modes = (
 	'stage' => {
@@ -92,6 +93,22 @@ my %patch_modes = (
 		VERB => 'Reset',
 		PARTICIPLE => 'resetting',
 		FILTER => 'index-only',
+	},
+	'checkout_index' => {
+		DIFF => 'diff-files -p',
+		APPLY => sub { apply_patch 'apply -R', @_; },
+		APPLY_CHECK => 'apply -R',
+		VERB => 'Check out',
+		PARTICIPLE => 'checking out',
+		FILTER => 'file-only',
+	},
+	'checkout_commit' => {
+		DIFF => 'diff-index -p',
+		APPLY => \&apply_patch_for_checkout_commit,
+		APPLY_CHECK => 'apply -R',
+		VERB => 'Check out',
+		PARTICIPLE => 'checking out',
+		FILTER => undef,
 	},
 );
 
@@ -1057,6 +1074,28 @@ sub apply_patch {
 	return $ret;
 }
 
+sub apply_patch_for_checkout_commit {
+	my $applies_index = run_git_apply 'apply -R --cached --recount --check', @_;
+	my $applies_worktree = run_git_apply 'apply -R --recount --check', @_;
+
+	if ($applies_worktree && $applies_index) {
+		run_git_apply 'apply -R --cached --recount', @_;
+		run_git_apply 'apply -R --recount', @_;
+		return 1;
+	} elsif (!$applies_index) {
+		print colored $error_color, "The selected hunks do not apply to the index!\n";
+		if (prompt_yesno "Apply them to the worktree anyway? ") {
+			return run_git_apply 'apply -R --recount', @_;
+		} else {
+			print colored $error_color, "Nothing was applied.\n";
+			return 0;
+		}
+	} else {
+		print STDERR @_;
+		return 0;
+	}
+}
+
 sub patch_update_cmd {
 	my @all_mods = list_modified($patch_mode_flavour{FILTER});
 	my @mods = grep { !($_->{BINARY}) } @all_mods;
@@ -1414,6 +1453,15 @@ sub process_args {
 				$patch_mode_revision = 'HEAD';
 				$arg = shift @ARGV or die "missing --";
 				if ($arg ne '--') {
+					$patch_mode_revision = $arg;
+					$arg = shift @ARGV or die "missing --";
+				}
+			} elsif ($1 eq 'checkout') {
+				$arg = shift @ARGV or die "missing --";
+				if ($arg eq '--') {
+					$patch_mode = 'checkout_index';
+				} else {
+					$patch_mode = 'checkout_commit';
 					$patch_mode_revision = $arg;
 					$arg = shift @ARGV or die "missing --";
 				}
