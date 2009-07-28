@@ -1,0 +1,37 @@
+git-shim(1)
+============
+
+NAME
+----
+git-shim - Helper programs for interoperation with remote git
+
+SYNOPSIS
+--------
+'git shim-<transport>' <remote>
+
+DESCRIPTION
+-----------
+
+These programs are normally not used directly by end users, but are
+invoked by various git programs that interact with remote repositories
+when the repository they would operate on will be accessed using
+transport code not linked into the main git binary.
+
+COMMANDS
+--------
+
+Commands are given by the caller on the helper's standard input, one per line.
+
+'list'::
+	Lists the refs, one per line, if the format "<value>
+	<name>". The value is either a hex sha1 hash or "@<dest>" for
+	symrefs. After the complete list, outputs a blank line.
+
+'fetch' ref::
+	Fetches the given ref, writing the necessary objects to the
+	database. Outputs a blank line when the fetch is complete.
++
+If a fatal error occurs, the program writes the error message to
+stderr and exits. The caller should expect that a suitable error
+message has been printed if the child closes the connection without
+completing a valid response for the current command.
