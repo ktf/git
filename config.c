@@ -545,50 +545,30 @@ static int git_default_i18n_config(const char *var, const char *value)
 	return 0;
 }
 
-int git_tracking_config(const char *var, const char *value, struct tracking_config *cfg)
-{
-	var = strrchr (var, '.');
-	if (!strcmp(var, ".autosetupmerge")) {
-		if (value && !strcasecmp(value, "always")) {
-			cfg->merge = BRANCH_TRACK_ALWAYS;
-			return 0;
-		}
-		cfg->merge = git_config_bool(var, value);
-		return 0;
-	}
-	if (!strcmp(var, ".autosetuppush")) {
-		cfg->push = git_config_bool(var, value);
-		return 0;
-	}
-	if (!strcmp(var, ".autosetuprebase")) {
-		if (!value)
-			value = "always";
-		cfg->rebase = AUTOREBASE_NEVER;
-		if (!strcmp(value, "never"))
-			;
-		else if (!strcmp(value, "local"))
-			cfg->rebase = AUTOREBASE_LOCAL;
-		else if (!strcmp(value, "remote"))
-			cfg->rebase = AUTOREBASE_REMOTE;
-		else if (!strcmp(value, "always") ||
-			 git_config_bool (var, value))
-			cfg->rebase = AUTOREBASE_ALWAYS;
-		return 0;
-	}
-
-	/* Add other config variables here and to Documentation/config.txt. */
-	return 0;
-}
-
 static int git_default_branch_config(const char *var, const char *value)
 {
-	int result;
-
-	if (!prefixcmp(var, "branch.")
-	    && !strchr (var + 7, '.')) {
-		result = git_tracking_config (var, value, &git_branch_track);
-		if (result)
-			return result;
+	if (!strcmp(var, "branch.autosetupmerge")) {
+		if (value && !strcasecmp(value, "always")) {
+			git_branch_track = BRANCH_TRACK_ALWAYS;
+			return 0;
+		}
+		git_branch_track = git_config_bool(var, value);
+		return 0;
+	}
+	if (!strcmp(var, "branch.autosetuprebase")) {
+		if (!value)
+			return config_error_nonbool(var);
+		else if (!strcmp(value, "never"))
+			autorebase = AUTOREBASE_NEVER;
+		else if (!strcmp(value, "local"))
+			autorebase = AUTOREBASE_LOCAL;
+		else if (!strcmp(value, "remote"))
+			autorebase = AUTOREBASE_REMOTE;
+		else if (!strcmp(value, "always"))
+			autorebase = AUTOREBASE_ALWAYS;
+		else
+			return error("Malformed value for %s", var);
+		return 0;
 	}
 
 	/* Add other config variables here and to Documentation/config.txt. */

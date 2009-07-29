@@ -527,7 +527,7 @@ int cmd_clone(int argc, const char **argv, const char *prefix)
 		remote_head = NULL;
 		option_no_checkout = 1;
 		if (!option_bare)
-			install_branch_config(0, "master", remote_get(option_origin),
+			install_branch_config(0, "master", option_origin,
 					      "refs/heads/master");
 	}
 
@@ -557,7 +557,7 @@ int cmd_clone(int argc, const char **argv, const char *prefix)
 				      head_points_at->peer_ref->name,
 				      reflog_msg.buf);
 
-			install_branch_config(0, head, remote_get(option_origin),
+			install_branch_config(0, head, option_origin,
 					      head_points_at->name);
 		}
 	} else if (remote_head) {
