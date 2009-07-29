@@ -116,15 +116,13 @@ void delete_branch_config (const char *name)
 
 	/* git config --unset-all remote.foo.push ^\+?refs/heads/bar:  */
 	branch = branch_get(name + 11);
-	if (branch->remote_name) {
-		strbuf_addf(&buf, "remote.%s.push", branch->remote_name);
-		strbuf_addstr(&push_re, "^\\+?");
-		strbuf_addstr_escape_re(&push_re, name);
-		strbuf_addch(&push_re, ':');
-		if (git_config_set_multivar(buf.buf, NULL, push_re.buf, 1) < 0) {
-			warning("Update of config-file failed");
-			goto fail;
-		}
+	strbuf_addf(&buf, "remote.%s.push", branch->remote_name);
+	strbuf_addstr(&push_re, "^\\+?");
+	strbuf_addstr_escape_re(&push_re, name);
+	strbuf_addch(&push_re, ':');
+	if (git_config_set_multivar(buf.buf, NULL, push_re.buf, 1) < 0) {
+		warning("Update of config-file failed");
+		goto fail;
 	}
 	strbuf_reset(&buf);
 	strbuf_addf(&buf, "branch.%s", name + 11);
