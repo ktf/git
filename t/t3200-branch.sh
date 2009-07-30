@@ -233,11 +233,47 @@ test_expect_success 'avoid ambiguous track' '
 	git branch all1 master &&
 	test -z "$(git config branch.all1.merge)"
 '
+test_expect_success 'test push setup' \
+    'git config branch.autosetupmerge true &&
+     git config branch.autosetuppush true &&
+     git config remote.local.url . &&
+     git config remote.local.fetch refs/heads/*:refs/remotes/local/* &&
+     (git show-ref -q refs/remotes/local/master || git fetch local) &&
+     git branch my11 local/master &&
+     test $(git config branch.my11.remote) = local &&
+     test $(git config branch.my11.merge) = refs/heads/master
+     test $(git config remote.local.push) = refs/heads/my11:refs/heads/master
+'
+
+test_expect_success 'test multiple push setups' \
+    'git config remote.local.url . &&
+     git config remote.local.fetch refs/heads/*:refs/remotes/local/* &&
+     (git show-ref -q refs/remotes/local/master || git fetch local) &&
+     git branch my12 local/master &&
+     test $(git config branch.my12.remote) = local &&
+     test $(git config branch.my12.merge) = refs/heads/master &&
+     (if git config remote.local.push; then exit 1; else test $? = 2; fi)
+'
+
+test_expect_success 'test push setup cleanup' \
+    'git config branch.autosetupmerge true &&
+     git config branch.autosetuppush true &&
+     git config remote.local.url . &&
+     git config remote.local.fetch refs/heads/*:refs/remotes/local/* &&
+     (git show-ref -q refs/remotes/local/master || git fetch local) &&
+     (git branch my11 local/master || :) &&
+     (git branch my12 local/master || :) &&
+     git branch -d my11 &&
+     test $(git config remote.local.push) = refs/heads/my12:refs/heads/master &&
+     git branch -d my12 &&
+     test z$(git config remote.local.push) = z
+'
 
 test_expect_success 'autosetuprebase local on a tracked local branch' '
 	git config remote.local.url . &&
 	git config remote.local.fetch refs/heads/*:refs/remotes/local/* &&
 	git config branch.autosetuprebase local &&
+	git config branch.autosetuppush false &&
 	(git show-ref -q refs/remotes/local/o || git fetch local) &&
 	git branch mybase &&
 	git branch --track myr1 mybase &&
@@ -461,11 +497,61 @@ test_expect_success 'detect misconfigured autosetuprebase (bad value)' '
 	test_must_fail git branch
 '
 
-test_expect_success 'detect misconfigured autosetuprebase (no value)' '
+test_expect_success 'boolean value (no value) for autosetuprebase' '
 	git config --unset branch.autosetuprebase &&
 	echo "[branch] autosetuprebase" >> .git/config &&
-	test_must_fail git branch &&
-	git config --unset branch.autosetuprebase
+	git config remote.local.url . &&
+	git config remote.local.fetch refs/heads/*:refs/remotes/local/* &&
+	(git show-ref -q refs/remotes/local/master || git fetch local) &&
+	git branch --track myr21 local/master &&
+	git branch --track myr22 myr21 &&
+	test "$(git config branch.myr21.remote)" = local &&
+	test "$(git config branch.myr21.merge)" = refs/heads/master &&
+	test "z$(git config branch.myr21.rebase)" = ztrue &&
+	test "$(git config branch.myr22.remote)" = . &&
+	test "$(git config branch.myr22.merge)" = refs/heads/myr21 &&
+	test "z$(git config branch.myr22.rebase)" = ztrue
+'
+test_expect_success 'tracking remote with branch.autosetupmerge = false' '
+	git config remote.local.autosetupmerge true &&
+	git config branch.autosetupmerge false &&
+	git config remote.local.url . &&
+	git config remote.local.fetch refs/heads/*:refs/remotes/local/* &&
+	(git show-ref -q refs/remotes/local/master || git fetch local) &&
+	git branch myr23 local/master &&
+	test "$(git config branch.myr23.remote)" = local &&
+	test "$(git config branch.myr23.merge)" = refs/heads/master
 '
 
+test_expect_success 'non-tracking remote with branch.autosetupmerge = always' '
+	git config remote.local.autosetupmerge false &&
+	git config branch.autosetupmerge always &&
+	git branch myr24 local/master &&
+	test z"$(git config branch.myr24.remote)" = z &&
+	test z"$(git config branch.myr24.merge)" = z
+'
+
+test_expect_success 'tracking branch overriding remote configuration' '
+	git config remote.local.autosetupmerge false &&
+	git branch --track myr25 local/master &&
+	test "$(git config branch.myr25.remote)" = local &&
+	test "$(git config branch.myr25.merge)" = refs/heads/master
+'
+
+test_expect_success 'non-tracking branch overriding remote configuration' '
+	git config remote.local.autosetupmerge true &&
+	git branch --no-track myr26 local/master &&
+	test z"$(git config branch.myr26.remote)" = z &&
+	test z"$(git config branch.myr26.merge)" = z
+'
+
+test_expect_success '--no-track and multiple matches ' '
+	git config branch.autosetupmerge true &&
+	git config remote.local2.url . &&
+	git config remote.local2.fetch refs/heads/*:refs/remotes/local/* &&
+	git fetch local2 &&
+	git branch --no-track myr96 local/master
+	test z"$(git config branch.myr96.remote)" = z &&
+	test z"$(git config branch.myr96.merge)" = z
+'
 test_done

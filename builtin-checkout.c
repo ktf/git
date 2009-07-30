@@ -637,7 +637,7 @@ int cmd_checkout(int argc, const char **argv, const char *prefix)
 	}
 
 	if (opts.track == BRANCH_TRACK_UNSPECIFIED)
-		opts.track = git_branch_track;
+		opts.track = git_branch_track.merge;
 	if (conflict_style) {
 		opts.merge = 1; /* implied */
 		git_xmerge_config("merge.conflictstyle", conflict_style, NULL);

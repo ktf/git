@@ -136,6 +136,7 @@ static struct remote *make_remote(const char *name, int len)
 		ret->name = xstrndup(name, len);
 	else
 		ret->name = xstrdup(name);
+	ret->track = git_branch_track;
 	return ret;
 }
 
@@ -380,6 +381,8 @@ static int handle_config(const char *key, const char *value, void *cb)
 		return 0;
 	remote = make_remote(name, subkey - name);
 	remote->origin = REMOTE_CONFIG;
+	if (git_tracking_config(key, value, &remote->track))
+		return -1;
 	if (!strcmp(subkey, ".mirror"))
 		remote->mirror = git_config_bool(key, value);
 	else if (!strcmp(subkey, ".skipdefaultupdate"))

@@ -489,16 +489,25 @@ branch.autosetupmerge::
 	done when the starting point is either a local branch or remote
 	branch. This option defaults to true.
 
+branch.autosetuppush::
+	Tells 'git-branch' and 'git-checkout' to setup new branches
+	so that linkgit:git-push[1] will push into the starting point
+	branch.  Note that this option applies only to branches created
+	from a remote branch, and only if git is setting up merging
+	from the remote branch (via any one of branch.autosetupmerge,
+	remote.<name>.autosetupmerge, or `--track`).  This option defaults
+	to false.
+
 branch.autosetuprebase::
 	When a new branch is created with 'git-branch' or 'git-checkout'
 	that tracks another branch, this variable tells git to set
 	up pull to rebase instead of merge (see "branch.<name>.rebase").
-	When `never`, rebase is never automatically set to true.
+	When `never` or `false`, rebase is never automatically set to true.
 	When `local`, rebase is set to true for tracked branches of
 	other local branches.
 	When `remote`, rebase is set to true for tracked branches of
 	remote branches.
-	When `always`, rebase will be set to true for all tracking
+	When `always` or `true`, rebase will be set to true for all tracking
 	branches.
 	See "branch.autosetupmerge" for details on how to set up a
 	branch to track another branch.
@@ -1376,6 +1385,29 @@ remote.<name>.uploadpack::
 remote.<name>.tagopt::
 	Setting this value to \--no-tags disables automatic tag following when
 	fetching from remote <name>
+
+remote.<name>.autosetupmerge::
+	Tells 'git-branch' and 'git-checkout' to setup new branches
+	so that linkgit:git-pull[1] will appropriately merge from the
+	starting point branch.  If present, this overrides the global
+	option branch.autosetupmerge, and can have the same settings.
+
+remote.<name>.autosetuppush::
+	Tells 'git-branch' and 'git-checkout' to setup new branches
+	so that linkgit:git-push[1] will push into the starting point
+	branch.  If present, this overrides the global option
+	branch.autosetuppush, and can have the same settings.
+	Note that this option applies only if git is setting
+	up merging from the remote branch (via any one of
+	branch.autosetupmerge, remote.<name>.autosetupmerge, or
+	`--track`).
+
+remote.<name>.autosetuprebase::
+	When a new branch is created with 'git-branch' or 'git-checkout'
+	that tracks another branch, this variable tells git to set
+	up pull to rebase instead of merge (see "branch.<name>.rebase").
+	If present, this overrides the global option
+	branch.autosetuprebase, and can have the same settings.
 
 remote.<name>.vcs::
 	Setting this to a value <vcs> will cause git to interact with
