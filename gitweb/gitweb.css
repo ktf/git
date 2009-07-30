@@ -226,21 +226,37 @@ th {
 	text-align: left;
 }
 
-tr.light:hover {
-	background-color: #edece6;
+/* do not change row style on hover for 'blame' view */
+tr.light,
+table.blame .light:hover {
+	background-color: #ffffff;
 }
 
-tr.dark {
+tr.dark,
+table.blame .dark:hover {
 	background-color: #f6f6f0;
 }
 
-tr.dark2 {
-	background-color: #f6f6f0;
-}
-
+/* currently both use the same, but it can change */
+tr.light:hover,
 tr.dark:hover {
 	background-color: #edece6;
 }
+
+/* boundary commits in 'blame' view */
+/* and commits without "previous" */
+tr.boundary td.sha1,
+tr.no-previous td.linenr {
+	font-weight: bold;
+}
+
+tr.color1:hover { background-color: #e6ede6; }
+tr.color2:hover { background-color: #e6e6ed; }
+tr.color3:hover { background-color: #ede6e6; }
+
+tr.color1 { background-color: #f6fff6; }
+tr.color2 { background-color: #f6f6ff; }
+tr.color3 { background-color: #fff6f6; }
 
 td {
 	padding: 2px 5px;
@@ -262,7 +278,7 @@ td.sha1 {
 	font-family: monospace;
 }
 
-td.error {
+.error {
 	color: red;
 	background-color: yellow;
 }
@@ -331,6 +347,17 @@ td.pre, div.pre, div.diff {
 
 td.mode {
 	font-family: monospace;
+}
+
+/* progress of blame_interactive */
+div#progress_bar {
+	height: 2px;
+	margin-bottom: -2px;
+	background-color: #d8d9d0;
+}
+div#progress_info {
+	float: right;
+	text-align: right;
 }
 
 /* styling of diffs (patchsets): commitdiff and blobdiff views */
