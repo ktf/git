@@ -72,6 +72,56 @@ sub colored {
 
 # command line options
 my $patch_mode;
+my $patch_mode_revision;
+
+sub apply_patch;
+sub apply_patch_for_checkout_commit;
+sub apply_patch_for_stash;
+
+my %patch_modes = (
+	'stage' => {
+		DIFF => 'diff-files -p',
+		APPLY => sub { apply_patch 'apply --cached', @_; },
+		APPLY_CHECK => 'apply --cached',
+		VERB => 'Stage',
+		PARTICIPLE => 'staging',
+		FILTER => 'file-only',
+	},
+	'stash' => {
+		DIFF => 'diff-index -p HEAD',
+		APPLY => sub { apply_patch 'apply --cached', @_; },
+		APPLY_CHECK => 'apply --cached',
+		VERB => 'Stash',
+		PARTICIPLE => 'stashing',
+		FILTER => undef,
+	},
+	'reset' => {
+		DIFF => 'diff-index -p --cached',
+		APPLY => sub { apply_patch 'apply -R --cached', @_; },
+		APPLY_CHECK => 'apply -R --cached',
+		VERB => 'Reset',
+		PARTICIPLE => 'resetting',
+		FILTER => 'index-only',
+	},
+	'checkout_index' => {
+		DIFF => 'diff-files -p',
+		APPLY => sub { apply_patch 'apply -R', @_; },
+		APPLY_CHECK => 'apply -R',
+		VERB => 'Check out',
+		PARTICIPLE => 'checking out',
+		FILTER => 'file-only',
+	},
+	'checkout_commit' => {
+		DIFF => 'diff-index -p',
+		APPLY => \&apply_patch_for_checkout_commit,
+		APPLY_CHECK => 'apply -R',
+		VERB => 'Check out',
+		PARTICIPLE => 'checking out',
+		FILTER => undef,
+	},
+);
+
+my %patch_mode_flavour = %{$patch_modes{stage}};
 
 sub run_cmd_pipe {
 	if ($^O eq 'MSWin32' || $^O eq 'msys') {
@@ -190,7 +240,14 @@ sub list_modified {
 		return if (!@tracked);
 	}
 
-	my $reference = is_initial_commit() ? get_empty_tree() : 'HEAD';
+	my $reference;
+	if (defined $patch_mode_revision and $patch_mode_revision ne 'HEAD') {
+		$reference = $patch_mode_revision;
+	} elsif (is_initial_commit()) {
+		$reference = get_empty_tree();
+	} else {
+		$reference = 'HEAD';
+	}
 	for (run_cmd_pipe(qw(git diff-index --cached
 			     --numstat --summary), $reference,
 			     '--', @tracked)) {
@@ -613,12 +670,24 @@ sub add_untracked_cmd {
 	print "\n";
 }
 
+sub run_git_apply {
+	my $cmd = shift;
+	my $fh;
+	open $fh, '| git ' . $cmd;
+	print $fh @_;
+	return close $fh;
+}
+
 sub parse_diff {
 	my ($path) = @_;
-	my @diff = run_cmd_pipe(qw(git diff-files -p --), $path);
+	my @diff_cmd = split(" ", $patch_mode_flavour{DIFF});
+	if (defined $patch_mode_revision) {
+		push @diff_cmd, $patch_mode_revision;
+	}
+	my @diff = run_cmd_pipe("git", @diff_cmd, "--", $path);
 	my @colored = ();
 	if ($diff_use_color) {
-		@colored = run_cmd_pipe(qw(git diff-files -p --color --), $path);
+		@colored = run_cmd_pipe("git", @diff_cmd, qw(--color --), $path);
 	}
 	my (@hunk) = { TEXT => [], DISPLAY => [], TYPE => 'header' };
 
@@ -877,6 +946,7 @@ sub edit_hunk_manually {
 		or die "failed to open hunk edit file for writing: " . $!;
 	print $fh "# Manual hunk edit mode -- see bottom for a quick guide\n";
 	print $fh @$oldtext;
+	my $participle = $patch_mode_flavour{PARTICIPLE};
 	print $fh <<EOF;
 # ---
 # To remove '-' lines, make them ' ' lines (context).
@@ -884,7 +954,7 @@ sub edit_hunk_manually {
 # Lines starting with # will be removed.
 #
 # If the patch applies cleanly, the edited hunk will immediately be
-# marked for staging. If it does not apply cleanly, you will be given
+# marked for $participle. If it does not apply cleanly, you will be given
 # an opportunity to edit again. If all lines of the hunk are removed,
 # then the edit is aborted and the hunk is left unchanged.
 EOF
@@ -918,11 +988,8 @@ EOF
 
 sub diff_applies {
 	my $fh;
-	open $fh, '| git apply --recount --cached --check';
-	for my $h (@_) {
-		print $fh @{$h->{TEXT}};
-	}
-	return close $fh;
+	return run_git_apply($patch_mode_flavour{APPLY_CHECK} . ' --recount --check',
+			     map { @{$_->{TEXT}} } @_);
 }
 
 sub _restore_terminal_and_die {
@@ -988,12 +1055,13 @@ sub edit_hunk_loop {
 }
 
 sub help_patch_cmd {
-	print colored $help_color, <<\EOF ;
-y - stage this hunk
-n - do not stage this hunk
-q - quit, do not stage this hunk nor any of the remaining ones
-a - stage this and all the remaining hunks in the file
-d - do not stage this hunk nor any of the remaining hunks in the file
+	my $verb = lc $patch_mode_flavour{VERB};
+	print colored $help_color, <<EOF ;
+y - $verb this hunk
+n - do not $verb this hunk
+q - quit, do not $verb this hunk nor any of the remaining ones
+a - $verb this and all the remaining hunks in the file
+d - do not $verb this hunk nor any of the remaining hunks in the file
 g - select a hunk to go to
 / - search for a hunk matching the given regex
 j - leave this hunk undecided, see next undecided hunk
@@ -1006,8 +1074,39 @@ e - manually edit the current hunk
 EOF
 }
 
+sub apply_patch {
+	my $cmd = shift;
+	my $ret = run_git_apply $cmd . ' --recount', @_;
+	if (!$ret) {
+		print STDERR @_;
+	}
+	return $ret;
+}
+
+sub apply_patch_for_checkout_commit {
+	my $applies_index = run_git_apply 'apply -R --cached --recount --check', @_;
+	my $applies_worktree = run_git_apply 'apply -R --recount --check', @_;
+
+	if ($applies_worktree && $applies_index) {
+		run_git_apply 'apply -R --cached --recount', @_;
+		run_git_apply 'apply -R --recount', @_;
+		return 1;
+	} elsif (!$applies_index) {
+		print colored $error_color, "The selected hunks do not apply to the index!\n";
+		if (prompt_yesno "Apply them to the worktree anyway? ") {
+			return run_git_apply 'apply -R --recount', @_;
+		} else {
+			print colored $error_color, "Nothing was applied.\n";
+			return 0;
+		}
+	} else {
+		print STDERR @_;
+		return 0;
+	}
+}
+
 sub patch_update_cmd {
-	my @all_mods = list_modified('file-only');
+	my @all_mods = list_modified($patch_mode_flavour{FILTER});
 	my @mods = grep { !($_->{BINARY}) } @all_mods;
 	my @them;
 
@@ -1138,8 +1237,8 @@ sub patch_update_file {
 		for (@{$hunk[$ix]{DISPLAY}}) {
 			print;
 		}
-		print colored $prompt_color, 'Stage ',
-		  ($hunk[$ix]{TYPE} eq 'mode' ? 'mode change' : 'this hunk'),
+		print colored $prompt_color, $patch_mode_flavour{VERB},
+		  ($hunk[$ix]{TYPE} eq 'mode' ? ' mode change' : ' this hunk'),
 		  " [y,n,q,a,d,/$other,?]? ";
 		my $line = prompt_single_character;
 		if ($line) {
@@ -1313,16 +1412,9 @@ sub patch_update_file {
 
 	if (@result) {
 		my $fh;
-
-		open $fh, '| git apply --cached --recount';
-		for (@{$head->{TEXT}}, @result) {
-			print $fh $_;
-		}
-		if (!close $fh) {
-			for (@{$head->{TEXT}}, @result) {
-				print STDERR $_;
-			}
-		}
+		my @patch = (@{$head->{TEXT}}, @result);
+		my $apply_routine = $patch_mode_flavour{APPLY};
+		&$apply_routine(@patch);
 		refresh();
 	}
 
@@ -1363,11 +1455,38 @@ EOF
 sub process_args {
 	return unless @ARGV;
 	my $arg = shift @ARGV;
-	if ($arg eq "--patch") {
-		$patch_mode = 1;
-		$arg = shift @ARGV or die "missing --";
+	if ($arg =~ /--patch(?:=(.*))?/) {
+		if (defined $1) {
+			if ($1 eq 'reset') {
+				$patch_mode = 'reset';
+				$patch_mode_revision = 'HEAD';
+				$arg = shift @ARGV or die "missing --";
+				if ($arg ne '--') {
+					$patch_mode_revision = $arg;
+					$arg = shift @ARGV or die "missing --";
+				}
+			} elsif ($1 eq 'checkout') {
+				$arg = shift @ARGV or die "missing --";
+				if ($arg eq '--') {
+					$patch_mode = 'checkout_index';
+				} else {
+					$patch_mode = 'checkout_commit';
+					$patch_mode_revision = $arg;
+					$arg = shift @ARGV or die "missing --";
+				}
+			} elsif ($1 eq 'stage' or $1 eq 'stash') {
+				$patch_mode = $1;
+				$arg = shift @ARGV or die "missing --";
+			} else {
+				die "unknown --patch mode: $1";
+			}
+		} else {
+			$patch_mode = 'stage';
+			$arg = shift @ARGV or die "missing --";
+		}
 		die "invalid argument $arg, expecting --"
 		    unless $arg eq "--";
+		%patch_mode_flavour = %{$patch_modes{$patch_mode}};
 	}
 	elsif ($arg ne "--") {
 		die "invalid argument $arg, expecting --";
