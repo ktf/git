@@ -117,6 +117,7 @@ git-revert
 git-rm
 git-send-email
 git-send-pack
+git-sequencer--helper
 git-sh-setup
 git-shell
 git-shortlog

@@ -117,18 +117,7 @@ mark_action_done () {
 }
 
 make_patch () {
-	sha1_and_parents="$(git rev-list --parents -1 "$1")"
-	case "$sha1_and_parents" in
-	?*' '?*' '?*)
-		git diff --cc $sha1_and_parents
-		;;
-	?*' '?*)
-		git diff-tree -p "$1^!"
-		;;
-	*)
-		echo "Root commit"
-		;;
-	esac > "$DOTEST"/patch
+	git sequencer--helper --make-patch "$1"
 	test -f "$DOTEST"/message ||
 		git cat-file commit "$1" | sed "1,/^$/d" > "$DOTEST"/message
 	test -f "$DOTEST"/author-script ||
