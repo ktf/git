@@ -30,6 +30,13 @@ submodule.<name>.path::
 submodule.<name>.url::
 	Defines an url from where the submodule repository can be cloned.
 
+submodule.<name>.receivepack::
+	The default program to execute on the remote side when pushing.  See
+	option \--receive-pack of linkgit:git-push[1].
+
+submodule.<name>.uploadpack::
+	The default program to execute on the remote side when fetching.  See
+	option \--upload-pack of linkgit:git-fetch-pack[1].
 
 EXAMPLES
 --------
@@ -42,12 +49,16 @@ Consider the following .gitmodules file:
 
 	[submodule "libbar"]
 		path = include/bar
-		url = git://bar.com/git/lib.git
+		url = ssh://bar.com/~/git/lib.git
+		uploadpack = /home/you/bin/git-upload-pack-wrapper
+		receivepack = /home/you/bin/git-receive-pack-wrapper
 
 
 This defines two submodules, `libfoo` and `libbar`. These are expected to
 be checked out in the paths 'include/foo' and 'include/bar', and for both
 submodules an url is specified which can be used for cloning the submodules.
+For `libbar`, packs are retrieved and stored via the upload and receive
+wrappers, respectively.
 
 SEE ALSO
 --------

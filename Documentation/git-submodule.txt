@@ -9,7 +9,7 @@ git-submodule - Initialize, update or inspect submodules
 SYNOPSIS
 --------
 [verse]
-'git submodule' [--quiet] add [-b branch] [--] <repository> <path>
+'git submodule' [--quiet] add [-b branch] [-u <git-upload-pack>] [--receive-pack <git-receive-pack>] [--] <repository> <path>
 'git submodule' [--quiet] status [--cached] [--] [<path>...]
 'git submodule' [--quiet] init [--] [<path>...]
 'git submodule' [--quiet] update [--init] [--] [<path>...]
@@ -158,6 +158,19 @@ OPTIONS
 -b::
 --branch::
 	Branch of repository to add as submodule.
+
+--upload-pack <upload-pack>::
+-u <upload-pack>::
+	When given, and the repository to clone from is accessed
+	via ssh, this specifies a non-default path for the
+	'git-upload-pack' program on the remote end.  See
+	linkgit:git-fetch-pack[1].
+
+--receive-pack <receive-pack>::
+	When given, and the repository to clone from is accessed
+	via ssh, this specifies a non-default path for the
+	'git-receive-pack' program on the remote end.  See
+	linkgit:git-push[1].
 
 --cached::
 	This option is only valid for status and summary commands.  These

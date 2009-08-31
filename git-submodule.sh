@@ -90,6 +90,8 @@ module_clone()
 {
 	path=$1
 	url=$2
+	uploadpack=$3
+	receivepack=$4
 
 	# If there already is a directory at the submodule path,
 	# expect it to be empty (since that is the default checkout
@@ -105,8 +107,23 @@ module_clone()
 	test -e "$path" &&
 	die "A file already exist at path '$path'"
 
-	git-clone -n "$url" "$path" ||
+	if test "$uploadpack"
+	then
+	    git-clone --upload-pack $uploadpack -n "$url" "$path"
+	else
+	    git-clone -n "$url" "$path"
+	fi ||
 	die "Clone of '$url' into submodule path '$path' failed"
+	if test "$uploadpack"
+	then
+	    git config -f "${path}/.git/config" remote.origin.uploadpack "$uploadpack" ||
+	    echo "  Warn: Failed to set uploadpack for '$url' in submodule path '$path'."
+	fi
+	if test "$receivepack"
+	then
+	    git config -f "${path}/.git/config" remote.origin.receivepack "$receivepack" ||
+	    echo "  Warn: Failed to set receivepack for '$url' in submodule path '$path'."
+	fi
 }
 
 #
@@ -129,6 +146,16 @@ cmd_add()
 			;;
 		-q|--quiet)
 			quiet=1
+			;;
+		-u|--upload-pack)
+			case "$2" in '') usage ;; esac
+			uploadpack=$2
+			shift
+			;;
+		--receive-pack)
+			case "$2" in '') usage ;; esac
+			receivepack=$2
+			shift
 			;;
 		--)
 			shift
@@ -191,9 +218,17 @@ cmd_add()
 			;;
 		esac
 		git config submodule."$path".url "$url"
+		if test "$uploadpack"
+		then
+		    git config submodule."$path".uploadpack "$uploadpack"
+		fi
+		if test "$receivepack"
+		then
+		    git config submodule."$path".receivepack "$receivepack"
+		fi
 	else
 
-		module_clone "$path" "$realrepo" || exit
+		module_clone "$path" "$realrepo" "$uploadpack" "$receivepack" || exit
 		(unset GIT_DIR; cd "$path" && git checkout -f -q ${branch:+-b "$branch" "origin/$branch"}) ||
 		die "Unable to checkout submodule '$path'"
 	fi
@@ -202,7 +237,19 @@ cmd_add()
 	die "Failed to add submodule '$path'"
 
 	git config -f .gitmodules submodule."$path".path "$path" &&
-	git config -f .gitmodules submodule."$path".url "$repo" &&
+	git config -f .gitmodules submodule."$path".url "$repo" ||
+	die "Failed to register submodule '$path'"
+
+	if test "$uploadpack"
+        then
+	    git config -f .gitmodules submodule."$path".uploadpack "$uploadpack" ||
+	    die "Failed to register submodule '$path'"
+	fi
+	if test "$receivepack"
+        then
+	    git config -f .gitmodules submodule."$path".receivepack "$receivepack" ||
+	    die "Failed to register submodule '$path'"
+	fi
 	git add .gitmodules ||
 	die "Failed to register submodule '$path'"
 }
@@ -277,6 +324,19 @@ cmd_init()
 		git config submodule."$name".url "$url" ||
 		die "Failed to register url for submodule path '$path'"
 
+		uploadpack=$(git config -f .gitmodules submodule."$name".uploadpack)
+		receivepack=$(git config -f .gitmodules submodule."$name".receivepack)
+		if test "$uploadpack"
+		then
+		    git config submodule."$name".uploadpack "$uploadpack" ||
+		    echo "  Warn: Failed to set uploadpack for '$url' in submodule path '$path'."
+		fi
+		if test "$receivepack"
+		then
+		    git config submodule."$name".receivepack "$receivepack" ||
+		    echo "  Warn: Failed to set receivepack for '$url' in submodule path '$path'."
+		fi
+
 		say "Submodule '$name' ($url) registered for path '$path'"
 	done
 }
@@ -330,7 +390,8 @@ cmd_update()
 
 		if ! test -d "$path"/.git -o -f "$path"/.git
 		then
-			module_clone "$path" "$url" || exit
+			module_clone "$path" "$url" "$(git config submodule."$name".uploadpack)" \
+			    "$(git config submodule."$name".receivepack)" || exit
 			subsha1=
 		else
 			subsha1=$(unset GIT_DIR; cd "$path" &&
@@ -655,6 +716,18 @@ cmd_sync()
 			remote=$(get_default_remote)
 			say "Synchronizing submodule url for '$name'"
 			git config remote."$remote".url "$url"
+			uploadpack=$(git config -f .gitmodules submodule."$name".uploadpack)
+			receivepack=$(git config -f .gitmodules submodule."$name".receivepack)
+			if test "$uploadpack"
+			then
+			    git config submodule."$name".uploadpack "$uploadpack" ||
+			    echo "  Warn: Failed to set uploadpack for '$url' in submodule path '$name'."
+			fi
+			if test "$receivepack"
+			then
+			    git config submodule."$name".receivepack "$receivepack" ||
+			    echo "  Warn: Failed to set receivepack for '$url' in submodule path '$name'."
+			fi
 		)
 		fi
 	done
