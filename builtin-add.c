@@ -10,12 +10,14 @@
 #include "cache-tree.h"
 #include "run-command.h"
 #include "parse-options.h"
+#include "diff.h"
+#include "revision.h"
 
 static const char * const builtin_add_usage[] = {
 	"git add [options] [--] <filepattern>...",
 	NULL
 };
-static int patch_interactive = 0, add_interactive = 0;
+static int patch_interactive, add_interactive, edit_interactive;
 static int take_worktree_changes;
 
 static void fill_pathspec_matches(const char **pathspec, char *seen, int specs)
@@ -61,40 +63,38 @@ static void prune_directory(struct dir_struct *dir, const char **pathspec, int p
 	fill_pathspec_matches(pathspec, seen, specs);
 
 	for (i = 0; i < specs; i++) {
-		if (!seen[i] && !file_exists(pathspec[i]))
+		if (!seen[i] && pathspec[i][0] && !file_exists(pathspec[i]))
 			die("pathspec '%s' did not match any files",
 					pathspec[i]);
 	}
         free(seen);
 }
 
-static void fill_directory(struct dir_struct *dir, const char **pathspec,
-		int ignored_too)
+static void treat_gitlinks(const char **pathspec)
 {
-	const char *path, *base;
-	int baselen;
+	int i;
 
-	/* Set up the default git porcelain excludes */
-	memset(dir, 0, sizeof(*dir));
-	if (!ignored_too) {
-		dir->collect_ignored = 1;
-		setup_standard_excludes(dir);
+	if (!pathspec || !*pathspec)
+		return;
+
+	for (i = 0; i < active_nr; i++) {
+		struct cache_entry *ce = active_cache[i];
+		if (S_ISGITLINK(ce->ce_mode)) {
+			int len = ce_namelen(ce), j;
+			for (j = 0; pathspec[j]; j++) {
+				int len2 = strlen(pathspec[j]);
+				if (len2 <= len || pathspec[j][len] != '/' ||
+				    memcmp(ce->name, pathspec[j], len))
+					continue;
+				if (len2 == len + 1)
+					/* strip trailing slash */
+					pathspec[j] = xstrndup(ce->name, len);
+				else
+					die ("Path '%s' is in submodule '%.*s'",
+						pathspec[j], len, ce->name);
+			}
+		}
 	}
-
-	/*
-	 * Calculate common prefix for the pathspec, and
-	 * use that to optimize the directory walk
-	 */
-	baselen = common_prefix(pathspec);
-	path = ".";
-	base = "";
-	if (baselen)
-		path = base = xmemdupz(*pathspec, baselen);
-
-	/* Read the directory and prune it */
-	read_directory(dir, path, base, baselen, pathspec);
-	if (pathspec)
-		prune_directory(dir, pathspec, baselen);
 }
 
 static void refresh(int verbose, const char **pathspec)
@@ -121,7 +121,7 @@ static const char **validate_pathspec(int argc, const char **argv, const char *p
 	if (pathspec) {
 		const char **p;
 		for (p = pathspec; *p; p++) {
-			if (has_symlink_leading_path(strlen(*p), *p)) {
+			if (has_symlink_leading_path(*p, strlen(*p))) {
 				int len = prefix ? strlen(prefix) : 0;
 				die("'%s' is beyond a symbolic link", *p + len);
 			}
@@ -160,6 +160,51 @@ int interactive_add(int argc, const char **argv, const char *prefix)
 	return status;
 }
 
+static int edit_patch(int argc, const char **argv, const char *prefix)
+{
+	char *file = xstrdup(git_path("ADD_EDIT.patch"));
+	const char *apply_argv[] = { "apply", "--recount", "--cached",
+		file, NULL };
+	struct child_process child;
+	struct rev_info rev;
+	int out;
+	struct stat st;
+
+	git_config(git_diff_basic_config, NULL); /* no "diff" UI options */
+
+	if (read_cache() < 0)
+		die ("Could not read the index");
+
+	init_revisions(&rev, prefix);
+	rev.diffopt.context = 7;
+
+	argc = setup_revisions(argc, argv, &rev, NULL);
+	rev.diffopt.output_format = DIFF_FORMAT_PATCH;
+	out = open(file, O_CREAT | O_WRONLY, 0644);
+	if (out < 0)
+		die ("Could not open '%s' for writing.", file);
+	rev.diffopt.file = fdopen(out, "w");
+	rev.diffopt.close_file = 1;
+	if (run_diff_files(&rev, 0))
+		die ("Could not write patch");
+
+	launch_editor(file, NULL, NULL);
+
+	if (stat(file, &st))
+		die_errno("Could not stat '%s'", file);
+	if (!st.st_size)
+		die("Empty patch. Aborted.");
+
+	memset(&child, 0, sizeof(child));
+	child.git_cmd = 1;
+	child.argv = apply_argv;
+	if (run_command(&child))
+		die ("Could not apply '%s'", file);
+
+	unlink(file);
+	return 0;
+}
+
 static struct lock_file lock_file;
 
 static const char ignore_error[] =
@@ -174,6 +219,7 @@ static struct option builtin_add_options[] = {
 	OPT_GROUP(""),
 	OPT_BOOLEAN('i', "interactive", &add_interactive, "interactive picking"),
 	OPT_BOOLEAN('p', "patch", &patch_interactive, "interactive patching"),
+	OPT_BOOLEAN('e', "edit", &edit_interactive, "edit current diff and apply"),
 	OPT_BOOLEAN('f', "force", &ignored_too, "allow adding otherwise ignored files"),
 	OPT_BOOLEAN('u', "update", &take_worktree_changes, "update tracked files"),
 	OPT_BOOLEAN('N', "intent-to-add", &intent_to_add, "record only the fact that the path will be added later"),
@@ -223,14 +269,19 @@ int cmd_add(int argc, const char **argv, const char *prefix)
 	int add_new_files;
 	int require_pathspec;
 
-	argc = parse_options(argc, argv, builtin_add_options,
-			  builtin_add_usage, 0);
+	git_config(add_config, NULL);
+
+	argc = parse_options(argc, argv, prefix, builtin_add_options,
+			  builtin_add_usage, PARSE_OPT_KEEP_ARGV0);
 	if (patch_interactive)
 		add_interactive = 1;
 	if (add_interactive)
-		exit(interactive_add(argc, argv, prefix));
+		exit(interactive_add(argc - 1, argv + 1, prefix));
 
-	git_config(add_config, NULL);
+	if (edit_interactive)
+		return(edit_patch(argc, argv, prefix));
+	argc--;
+	argv++;
 
 	if (addremove && take_worktree_changes)
 		die("-A and -u are mutually incompatible");
@@ -261,10 +312,23 @@ int cmd_add(int argc, const char **argv, const char *prefix)
 
 	if (read_cache() < 0)
 		die("index file corrupt");
+	treat_gitlinks(pathspec);
 
-	if (add_new_files)
+	if (add_new_files) {
+		int baselen;
+
+		/* Set up the default git porcelain excludes */
+		memset(&dir, 0, sizeof(dir));
+		if (!ignored_too) {
+			dir.flags |= DIR_COLLECT_IGNORED;
+			setup_standard_excludes(&dir);
+		}
+
 		/* This picks up the paths that are not tracked */
-		fill_directory(&dir, pathspec, ignored_too);
+		baselen = fill_directory(&dir, pathspec);
+		if (pathspec)
+			prune_directory(&dir, pathspec, baselen);
+	}
 
 	if (refresh_only) {
 		refresh(verbose, pathspec);

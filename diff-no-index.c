@@ -38,9 +38,13 @@ static int get_mode(const char *path, int *mode)
 
 	if (!path || !strcmp(path, "/dev/null"))
 		*mode = 0;
+#ifdef _WIN32
+	else if (!strcasecmp(path, "nul"))
+		*mode = 0;
+#endif
 	else if (!strcmp(path, "-"))
 		*mode = create_ce_mode(0666);
-	else if (stat(path, &st))
+	else if (lstat(path, &st))
 		return error("Could not access '%s'", path);
 	else
 		*mode = st.st_mode;
@@ -173,8 +177,10 @@ void diff_no_index(struct rev_info *revs,
 
 	/* Were we asked to do --no-index explicitly? */
 	for (i = 1; i < argc; i++) {
-		if (!strcmp(argv[i], "--"))
-			return;
+		if (!strcmp(argv[i], "--")) {
+			i++;
+			break;
+		}
 		if (!strcmp(argv[i], "--no-index"))
 			no_index = 1;
 		if (argv[i][0] != '-')
@@ -198,22 +204,17 @@ void diff_no_index(struct rev_info *revs,
 		die("git diff %s takes two paths",
 		    no_index ? "--no-index" : "[--no-index]");
 
-	/*
-	 * If the user asked for our exit code then don't start a
-	 * pager or we would end up reporting its exit code instead.
-	 */
-	if (!DIFF_OPT_TST(&revs->diffopt, EXIT_WITH_STATUS))
-		setup_pager();
-
 	diff_setup(&revs->diffopt);
-	if (!revs->diffopt.output_format)
-		revs->diffopt.output_format = DIFF_FORMAT_PATCH;
 	for (i = 1; i < argc - 2; ) {
 		int j;
 		if (!strcmp(argv[i], "--no-index"))
 			i++;
-		else if (!strcmp(argv[1], "-q"))
+		else if (!strcmp(argv[i], "-q")) {
 			options |= DIFF_SILENT_ON_REMOVED;
+			i++;
+		}
+		else if (!strcmp(argv[i], "--"))
+			i++;
 		else {
 			j = diff_opt_parse(&revs->diffopt, argv + i, argc - i);
 			if (!j)
@@ -222,10 +223,17 @@ void diff_no_index(struct rev_info *revs,
 		}
 	}
 
+	/*
+	 * If the user asked for our exit code then don't start a
+	 * pager or we would end up reporting its exit code instead.
+	 */
+	if (!DIFF_OPT_TST(&revs->diffopt, EXIT_WITH_STATUS))
+		setup_pager();
+
 	if (prefix) {
 		int len = strlen(prefix);
 
-		revs->diffopt.paths = xcalloc(2, sizeof(char*));
+		revs->diffopt.paths = xcalloc(2, sizeof(char *));
 		for (i = 0; i < 2; i++) {
 			const char *p = argv[argc - 2 + i];
 			/*
@@ -241,6 +249,9 @@ void diff_no_index(struct rev_info *revs,
 	else
 		revs->diffopt.paths = argv + argc - 2;
 	revs->diffopt.nr_paths = 2;
+	revs->diffopt.skip_stat_unmatch = 1;
+	if (!revs->diffopt.output_format)
+		revs->diffopt.output_format = DIFF_FORMAT_PATCH;
 
 	DIFF_OPT_SET(&revs->diffopt, EXIT_WITH_STATUS);
 	DIFF_OPT_SET(&revs->diffopt, NO_INDEX);

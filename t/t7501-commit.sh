@@ -38,7 +38,7 @@ test_expect_success \
 	"echo King of the bongo >file &&
 	test_must_fail git commit -m foo -a file"
 
-test_expect_success \
+test_expect_success PERL \
 	"using paths with --interactive" \
 	"echo bong-o-bong >file &&
 	! (echo 7 | git commit -m foo --interactive file)"
@@ -119,7 +119,7 @@ test_expect_success \
 	"echo 'gak' >file && \
 	 git commit -m 'author' --author 'Rubber Duck <rduck@convoy.org>' -a"
 
-test_expect_success \
+test_expect_success PERL \
 	"interactive add" \
 	"echo 7 | git commit --interactive | grep 'What now'"
 
@@ -127,6 +127,26 @@ test_expect_success \
 	"showing committed revisions" \
 	"git rev-list HEAD >current"
 
+cat >editor <<\EOF
+#!/bin/sh
+sed -e "s/good/bad/g" < "$1" > "$1-"
+mv "$1-" "$1"
+EOF
+chmod 755 editor
+
+cat >msg <<EOF
+A good commit message.
+EOF
+
+test_expect_success \
+	'editor not invoked if -F is given' '
+	 echo "moo" >file &&
+	 VISUAL=./editor git commit -a -F msg &&
+	 git show -s --pretty=format:"%s" | grep -q good &&
+	 echo "quack" >file &&
+	 echo "Another good message." | VISUAL=./editor git commit -a -F - &&
+	 git show -s --pretty=format:"%s" | grep -q good
+	 '
 # We could just check the head sha1, but checking each commit makes it
 # easier to isolate bugs.
 

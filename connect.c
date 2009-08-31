@@ -177,18 +177,11 @@ static enum protocol get_protocol(const char *name)
 
 static const char *ai_name(const struct addrinfo *ai)
 {
-	static char addr[INET_ADDRSTRLEN];
-	if ( AF_INET == ai->ai_family ) {
-		struct sockaddr_in *in;
-		in = (struct sockaddr_in *)ai->ai_addr;
-		inet_ntop(ai->ai_family, &in->sin_addr, addr, sizeof(addr));
-	} else if ( AF_INET6 == ai->ai_family ) {
-		struct sockaddr_in6 *in;
-		in = (struct sockaddr_in6 *)ai->ai_addr;
-		inet_ntop(ai->ai_family, &in->sin6_addr, addr, sizeof(addr));
-	} else {
+	static char addr[NI_MAXHOST];
+	if (getnameinfo(ai->ai_addr, ai->ai_addrlen, addr, sizeof(addr), NULL, 0,
+			NI_NUMERICHOST) != 0)
 		strcpy(addr, "(unknown)");
-	}
+
 	return addr;
 }
 
@@ -315,7 +308,7 @@ static int git_tcp_connect_sock(char *host, int flags)
 		/* Not numeric */
 		struct servent *se = getservbyname(port,"tcp");
 		if ( !se )
-			die("Unknown port %s\n", port);
+			die("Unknown port %s", port);
 		nport = se->s_port;
 	}
 
@@ -373,8 +366,6 @@ static void git_tcp_connect(int fd[2], char *host, int flags)
 
 
 static char *git_proxy_command;
-static const char *rhost_name;
-static int rhost_len;
 
 static int git_proxy_command_options(const char *var, const char *value,
 		void *cb)
@@ -383,6 +374,8 @@ static int git_proxy_command_options(const char *var, const char *value,
 		const char *for_pos;
 		int matchlen = -1;
 		int hostlen;
+		const char *rhost_name = cb;
+		int rhost_len = strlen(rhost_name);
 
 		if (git_proxy_command)
 			return 0;
@@ -426,11 +419,8 @@ static int git_proxy_command_options(const char *var, const char *value,
 
 static int git_use_proxy(const char *host)
 {
-	rhost_name = host;
-	rhost_len = strlen(host);
 	git_proxy_command = getenv("GIT_PROXY_COMMAND");
-	git_config(git_proxy_command_options, NULL);
-	rhost_name = NULL;
+	git_config(git_proxy_command_options, (void*)host);
 	return (git_proxy_command && *git_proxy_command);
 }
 
@@ -474,7 +464,7 @@ static void git_proxy_connect(int fd[2], char *host)
 
 #define MAX_CMD_LEN 1024
 
-char *get_port(char *host)
+static char *get_port(char *host)
 {
 	char *end;
 	char *p = strchr(host, ':');
@@ -507,7 +497,7 @@ struct child_process *git_connect(int fd[2], const char *url_orig,
 				  const char *prog, int flags)
 {
 	char *url = xstrdup(url_orig);
-	char *host, *path = url;
+	char *host, *path;
 	char *end;
 	int c;
 	struct child_process *conn;
@@ -589,7 +579,10 @@ struct child_process *git_connect(int fd[2], const char *url_orig,
 			git_tcp_connect(fd, host, flags);
 		/*
 		 * Separate original protocol components prog and path
-		 * from extended components with a NUL byte.
+		 * from extended host header with a NUL byte.
+		 *
+		 * Note: Do not add any other headers here!  Doing so
+		 * will cause older git-daemon servers to crash.
 		 */
 		packet_write(fd[1],
 			     "%s %s%chost=%s%c",
@@ -612,14 +605,18 @@ struct child_process *git_connect(int fd[2], const char *url_orig,
 		die("command line too long");
 
 	conn->in = conn->out = -1;
-	conn->argv = arg = xcalloc(6, sizeof(*arg));
+	conn->argv = arg = xcalloc(7, sizeof(*arg));
 	if (protocol == PROTO_SSH) {
 		const char *ssh = getenv("GIT_SSH");
+		int putty = ssh && strcasestr(ssh, "plink");
 		if (!ssh) ssh = "ssh";
 
 		*arg++ = ssh;
+		if (putty && !strcasestr(ssh, "tortoiseplink"))
+			*arg++ = "-batch";
 		if (port) {
-			*arg++ = "-p";
+			/* P is for PuTTY, p is for OpenSSH */
+			*arg++ = putty ? "-P" : "-p";
 			*arg++ = port;
 		}
 		*arg++ = host;

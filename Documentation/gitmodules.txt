@@ -38,6 +38,17 @@ submodule.<name>.uploadpack::
 	The default program to execute on the remote side when fetching.  See
 	option \--upload-pack of linkgit:git-fetch-pack[1].
 
+submodule.<name>.update::
+	Defines what to do when the submodule is updated by the superproject.
+	If 'checkout' (the default), the new commit specified in the
+	superproject will be checked out in the submodule on a detached HEAD.
+	If 'rebase', the current branch of the submodule will be rebased onto
+	the commit specified in the superproject. If 'merge', the commit
+	specified in the superproject will be merged into the current branch
+	in the submodule.
+	This config option is overridden if 'git submodule update' is given
+	the '--merge' or '--rebase' options.
+
 EXAMPLES
 --------
 

@@ -1,4 +1,5 @@
 /*
+(See Documentation/git-fast-import.txt for maintained documentation.)
 Format of STDIN stream:
 
   stream ::= cmd*;
@@ -18,8 +19,8 @@ Format of STDIN stream:
 
   new_commit ::= 'commit' sp ref_str lf
     mark?
-    ('author' sp name '<' email '>' when lf)?
-    'committer' sp name '<' email '>' when lf
+    ('author' sp name sp '<' email '>' sp when lf)?
+    'committer' sp name sp '<' email '>' sp when lf
     commit_msg
     ('from' sp (ref_str | hexsha1 | sha1exp_str | idnum) lf)?
     ('merge' sp (ref_str | hexsha1 | sha1exp_str | idnum) lf)*
@@ -43,7 +44,7 @@ Format of STDIN stream:
 
   new_tag ::= 'tag' sp tag_str lf
     'from' sp (ref_str | hexsha1 | sha1exp_str | idnum) lf
-    ('tagger' sp name '<' email '>' when lf)?
+    ('tagger' sp name sp '<' email '>' sp when lf)?
     tag_msg;
   tag_msg ::= data;
 
@@ -75,7 +76,7 @@ Format of STDIN stream:
     delim lf;
 
      # note: declen indicates the length of binary_data in bytes.
-     # declen does not include the lf preceeding the binary data.
+     # declen does not include the lf preceding the binary data.
      #
   exact_data ::= 'data' sp declen lf
     binary_data;
@@ -132,8 +133,8 @@ Format of STDIN stream:
      # always escapes the related input from comment processing.
      #
      # In case it is not clear, the '#' that starts the comment
-     # must be the first character on that the line (an lf have
-     # preceeded it).
+     # must be the first character on that line (an lf
+     # preceded it).
      #
   comment ::= '#' not_lf* lf;
   not_lf  ::= # Any byte that is not ASCII newline (LF);
@@ -150,6 +151,7 @@ Format of STDIN stream:
 #include "refs.h"
 #include "csum-file.h"
 #include "quote.h"
+#include "exec_cmd.h"
 
 #define PACK_ID_BITS 16
 #define MAX_PACK_ID ((1<<PACK_ID_BITS)-1)
@@ -210,7 +212,7 @@ struct tree_content;
 struct tree_entry
 {
 	struct tree_content *tree;
-	struct atom_str* name;
+	struct atom_str *name;
 	struct tree_entry_ms
 	{
 		uint16_t mode;
@@ -311,7 +313,7 @@ static unsigned int object_entry_alloc = 5000;
 static struct object_entry_pool *blocks;
 static struct object_entry *object_table[1 << 16];
 static struct mark_set *marks;
-static const char* mark_file;
+static const char *mark_file;
 
 /* Our last blob */
 static struct last_object last_blob = { STRBUF_INIT, 0, 0, 0 };
@@ -670,7 +672,7 @@ static struct branch *lookup_branch(const char *name)
 static struct branch *new_branch(const char *name)
 {
 	unsigned int hc = hc_str(name, strlen(name)) % branch_table_sz;
-	struct branch* b = lookup_branch(name);
+	struct branch *b = lookup_branch(name);
 
 	if (b)
 		die("Invalid attempt to create duplicate branch: %s", name);
@@ -816,9 +818,8 @@ static void start_packfile(void)
 	struct pack_header hdr;
 	int pack_fd;
 
-	snprintf(tmpfile, sizeof(tmpfile),
-		"%s/pack/tmp_pack_XXXXXX", get_object_directory());
-	pack_fd = xmkstemp(tmpfile);
+	pack_fd = odb_mkstemp(tmpfile, sizeof(tmpfile),
+			      "pack/tmp_pack_XXXXXX");
 	p = xcalloc(1, sizeof(*p) + strlen(tmpfile) + 2);
 	strcpy(p->pack_name, tmpfile);
 	p->pack_fd = pack_fd;
@@ -868,7 +869,7 @@ static char *create_index(void)
 	/* Generate the fan-out array. */
 	c = idx;
 	for (i = 0; i < 256; i++) {
-		struct object_entry **next = c;;
+		struct object_entry **next = c;
 		while (next < last) {
 			if ((*next)->sha1[0] != i)
 				break;
@@ -878,9 +879,8 @@ static char *create_index(void)
 		c = next;
 	}
 
-	snprintf(tmpfile, sizeof(tmpfile),
-		"%s/pack/tmp_idx_XXXXXX", get_object_directory());
-	idx_fd = xmkstemp(tmpfile);
+	idx_fd = odb_mkstemp(tmpfile, sizeof(tmpfile),
+			     "pack/tmp_idx_XXXXXX");
 	f = sha1fd(idx_fd, tmpfile);
 	sha1write(f, array, 256 * sizeof(int));
 	git_SHA1_Init(&ctx);
@@ -903,17 +903,12 @@ static char *keep_pack(char *curr_index_name)
 	static const char *keep_msg = "fast-import";
 	int keep_fd;
 
-	chmod(pack_data->pack_name, 0444);
-	chmod(curr_index_name, 0444);
-
-	snprintf(name, sizeof(name), "%s/pack/pack-%s.keep",
-		 get_object_directory(), sha1_to_hex(pack_data->sha1));
-	keep_fd = open(name, O_RDWR|O_CREAT|O_EXCL, 0600);
+	keep_fd = odb_pack_keep(name, sizeof(name), pack_data->sha1);
 	if (keep_fd < 0)
-		die("cannot create keep file");
+		die_errno("cannot create keep file");
 	write_or_die(keep_fd, keep_msg, strlen(keep_msg));
 	if (close(keep_fd))
-		die("failed to write keep file");
+		die_errno("failed to write keep file");
 
 	snprintf(name, sizeof(name), "%s/pack/pack-%s.pack",
 		 get_object_directory(), sha1_to_hex(pack_data->sha1));
@@ -936,7 +931,7 @@ static void unkeep_all_packs(void)
 		struct packed_git *p = all_packs[k];
 		snprintf(name, sizeof(name), "%s/pack/pack-%s.keep",
 			 get_object_directory(), sha1_to_hex(p->sha1));
-		unlink(name);
+		unlink_or_warn(name);
 	}
 }
 
@@ -944,6 +939,7 @@ static void end_packfile(void)
 {
 	struct packed_git *old_p = pack_data, *new_p;
 
+	clear_delta_base_cache();
 	if (object_count) {
 		char *idx_name;
 		int i;
@@ -957,7 +953,7 @@ static void end_packfile(void)
 		close(pack_data->pack_fd);
 		idx_name = keep_pack(create_index());
 
-		/* Register the packfile with core git's machinary. */
+		/* Register the packfile with core git's machinery. */
 		new_p = add_packed_git(idx_name, strlen(idx_name), 1);
 		if (!new_p)
 			die("core git rejected index %s", idx_name);
@@ -985,7 +981,7 @@ static void end_packfile(void)
 	}
 	else {
 		close(old_p->pack_fd);
-		unlink(old_p->pack_name);
+		unlink_or_warn(old_p->pack_name);
 	}
 	free(old_p);
 
@@ -1039,7 +1035,7 @@ static int store_object(
 	git_SHA_CTX c;
 	z_stream s;
 
-	hdrlen = sprintf((char*)hdr,"%s %lu", typename(type),
+	hdrlen = sprintf((char *)hdr,"%s %lu", typename(type),
 		(unsigned long)dat->len) + 1;
 	git_SHA1_Init(&c);
 	git_SHA1_Update(&c, hdr, hdrlen);
@@ -1221,7 +1217,7 @@ static const char *get_mode(const char *str, uint16_t *modep)
 
 static void load_tree(struct tree_entry *root)
 {
-	unsigned char* sha1 = root->versions[1].sha1;
+	unsigned char *sha1 = root->versions[1].sha1;
 	struct object_entry *myoe;
 	struct tree_content *t;
 	unsigned long size;
@@ -1262,8 +1258,8 @@ static void load_tree(struct tree_entry *root)
 		e->versions[0].mode = e->versions[1].mode;
 		e->name = to_atom(c, strlen(c));
 		c += e->name->str_len + 1;
-		hashcpy(e->versions[0].sha1, (unsigned char*)c);
-		hashcpy(e->versions[1].sha1, (unsigned char*)c);
+		hashcpy(e->versions[0].sha1, (unsigned char *)c);
+		hashcpy(e->versions[1].sha1, (unsigned char *)c);
 		c += 20;
 	}
 	free(buf);
@@ -1747,21 +1743,19 @@ static void parse_data(struct strbuf *sb)
 static int validate_raw_date(const char *src, char *result, int maxlen)
 {
 	const char *orig_src = src;
-	char *endp, sign;
-	unsigned long date;
+	char *endp;
 
 	errno = 0;
 
-	date = strtoul(src, &endp, 10);
+	strtoul(src, &endp, 10);
 	if (errno || endp == src || *endp != ' ')
 		return -1;
 
 	src = endp + 1;
 	if (*src != '-' && *src != '+')
 		return -1;
-	sign = *src;
 
-	date = strtoul(src + 1, &endp, 10);
+	strtoul(src + 1, &endp, 10);
 	if (errno || endp == src || *endp || (endp - orig_src) >= maxlen)
 		return -1;
 
@@ -1872,12 +1866,13 @@ static void file_change_m(struct branch *b)
 	if (!p)
 		die("Corrupt mode: %s", command_buf.buf);
 	switch (mode) {
+	case 0644:
+	case 0755:
+		mode |= S_IFREG;
 	case S_IFREG | 0644:
 	case S_IFREG | 0755:
 	case S_IFLNK:
 	case S_IFGITLINK:
-	case 0644:
-	case 0755:
 		/* ok */
 		break;
 	default:
@@ -1944,7 +1939,7 @@ static void file_change_m(struct branch *b)
 			    typename(type), command_buf.buf);
 	}
 
-	tree_content_set(&b->branch_tree, p, sha1, S_IFREG | mode, NULL);
+	tree_content_set(&b->branch_tree, p, sha1, mode, NULL);
 }
 
 static void file_change_d(struct branch *b)
@@ -2347,7 +2342,7 @@ static void import_marks(const char *input_file)
 	char line[512];
 	FILE *f = fopen(input_file, "r");
 	if (!f)
-		die("cannot read %s: %s", input_file, strerror(errno));
+		die_errno("cannot read '%s'", input_file);
 	while (fgets(line, sizeof(line), f)) {
 		uintmax_t mark;
 		char *end;
@@ -2405,6 +2400,8 @@ int main(int argc, const char **argv)
 {
 	unsigned int i, show_stats = 1;
 
+	git_extract_argv0_path(argv[0]);
+
 	setup_git_directory();
 	git_config(git_pack_config, NULL);
 	if (!pack_compression_seen && core_compression_seen)
@@ -2451,7 +2448,7 @@ int main(int argc, const char **argv)
 				fclose(pack_edges);
 			pack_edges = fopen(a + 20, "a");
 			if (!pack_edges)
-				die("Cannot open %s: %s", a + 20, strerror(errno));
+				die_errno("Cannot open '%s'", a + 20);
 		} else if (!strcmp(a, "--force"))
 			force_update = 1;
 		else if (!strcmp(a, "--quiet"))

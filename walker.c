@@ -18,7 +18,7 @@ void walker_say(struct walker *walker, const char *fmt, const char *hex)
 static void report_missing(const struct object *obj)
 {
 	char missing_hex[41];
-	strcpy(missing_hex, sha1_to_hex(obj->sha1));;
+	strcpy(missing_hex, sha1_to_hex(obj->sha1));
 	fprintf(stderr, "Cannot obtain needed %s %s\n",
 		obj->type ? typename(obj->type): "object", missing_hex);
 	if (!is_null_sha1(current_commit_sha1))
@@ -245,7 +245,7 @@ void walker_targets_free(int targets, char **target, const char **write_ref)
 {
 	while (targets--) {
 		free(target[targets]);
-		if (write_ref && write_ref[targets])
+		if (write_ref)
 			free((char *) write_ref[targets]);
 	}
 }

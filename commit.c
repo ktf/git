@@ -50,7 +50,6 @@ struct commit *lookup_commit(const unsigned char *sha1)
 
 static unsigned long parse_commit_date(const char *buf, const char *tail)
 {
-	unsigned long date;
 	const char *dateptr;
 
 	if (buf + 6 >= tail)
@@ -73,10 +72,7 @@ static unsigned long parse_commit_date(const char *buf, const char *tail)
 	if (buf >= tail)
 		return 0;
 	/* dateptr < buf && buf[-1] == '\n', so strtoul will stop at buf-1 */
-	date = strtoul(dateptr, NULL, 10);
-	if (date == ULONG_MAX)
-		date = 0;
-	return date;
+	return strtoul(dateptr, NULL, 10);
 }
 
 static struct commit_graft **commit_graft;
@@ -266,7 +262,11 @@ int parse_commit_buffer(struct commit *item, void *buffer, unsigned long size)
 		    bufptr[47] != '\n')
 			return error("bad parents in commit %s", sha1_to_hex(item->object.sha1));
 		bufptr += 48;
-		if (graft)
+		/*
+		 * The clone is shallow if nr_parent < 0, and we must
+		 * not traverse its real parents even when we unhide them.
+		 */
+		if (graft && (graft->nr_parent < 0 || grafts_replace_parents))
 			continue;
 		new_parent = lookup_commit(parent);
 		if (new_parent)
@@ -703,6 +703,21 @@ struct commit_list *get_merge_bases(struct commit *one, struct commit *two,
 				    int cleanup)
 {
 	return get_merge_bases_many(one, 1, &two, cleanup);
+}
+
+int is_descendant_of(struct commit *commit, struct commit_list *with_commit)
+{
+	if (!with_commit)
+		return 1;
+	while (with_commit) {
+		struct commit *other;
+
+		other = with_commit->item;
+		with_commit = with_commit->next;
+		if (in_merge_bases(other, &commit, 1))
+			return 1;
+	}
+	return 0;
 }
 
 int in_merge_bases(struct commit *commit, struct commit **reference, int num)

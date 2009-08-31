@@ -56,7 +56,7 @@ require Exporter;
 @EXPORT_OK = qw(command command_oneline command_noisy
                 command_output_pipe command_input_pipe command_close_pipe
                 command_bidi_pipe command_close_bidi_pipe
-                version exec_path hash_object git_cmd_try
+                version exec_path html_path hash_object git_cmd_try
                 remote_refs
                 temp_acquire temp_release temp_reset temp_path);
 
@@ -166,11 +166,12 @@ sub repository {
 		}
 	}
 
-	if (not defined $opts{Repository} and not defined $opts{WorkingCopy}) {
-		$opts{Directory} ||= '.';
+	if (not defined $opts{Repository} and not defined $opts{WorkingCopy}
+		and not defined $opts{Directory}) {
+		$opts{Directory} = '.';
 	}
 
-	if ($opts{Directory}) {
+	if (defined $opts{Directory}) {
 		-d $opts{Directory} or throw Error::Simple("Directory not found: $!");
 
 		my $search = Git->repository(WorkingCopy => $opts{Directory});
@@ -184,7 +185,7 @@ sub repository {
 
 		if ($dir) {
 			$dir =~ m#^/# or $dir = $opts{Directory} . '/' . $dir;
-			$opts{Repository} = $dir;
+			$opts{Repository} = abs_path($dir);
 
 			# If --git-dir went ok, this shouldn't die either.
 			my $prefix = $search->command_oneline('rev-parse', '--show-prefix');
@@ -489,6 +490,16 @@ C<git --exec-path>). Useful mostly only internally.
 =cut
 
 sub exec_path { command_oneline('--exec-path') }
+
+
+=item html_path ()
+
+Return path to the Git html documentation (the same as
+C<git --html-path>). Useful mostly only internally.
+
+=cut
+
+sub html_path { command_oneline('--html-path') }
 
 
 =item repo_path ()
@@ -1010,8 +1021,8 @@ sub _temp_cache {
 	my $temp_fd = \$TEMP_FILEMAP{$name};
 	if (defined $$temp_fd and $$temp_fd->opened) {
 		if ($TEMP_FILES{$$temp_fd}{locked}) {
-			throw Error::Simple("Temp file with moniker '",
-				$name, "' already in use");
+			throw Error::Simple("Temp file with moniker '" .
+				$name . "' already in use");
 		}
 	} else {
 		if (defined $$temp_fd) {
@@ -1269,6 +1280,8 @@ sub _cmd_exec {
 	my ($self, @args) = @_;
 	if ($self) {
 		$self->repo_path() and $ENV{'GIT_DIR'} = $self->repo_path();
+		$self->repo_path() and $self->wc_path()
+			and $ENV{'GIT_WORK_TREE'} = $self->wc_path();
 		$self->wc_path() and chdir($self->wc_path());
 		$self->wc_subdir() and chdir($self->wc_subdir());
 	}

@@ -5,6 +5,7 @@
  */
 
 #include "cache.h"
+#include "dir.h"
 #include "builtin.h"
 #include "parse-options.h"
 
@@ -21,9 +22,7 @@ static void count_objects(DIR *d, char *path, int len, int verbose,
 		const char *cp;
 		int bad = 0;
 
-		if ((ent->d_name[0] == '.') &&
-		    (ent->d_name[1] == 0 ||
-		     ((ent->d_name[1] == '.') && (ent->d_name[2] == 0))))
+		if (is_dot_or_dotdot(ent->d_name))
 			continue;
 		for (cp = ent->d_name; *cp; cp++) {
 			int ch = *cp;
@@ -61,7 +60,7 @@ static void count_objects(DIR *d, char *path, int len, int verbose,
 		hex[40] = 0;
 		if (get_sha1_hex(hex, sha1))
 			die("internal error");
-		if (has_sha1_pack(sha1, NULL))
+		if (has_sha1_pack(sha1))
 			(*packed_loose)++;
 	}
 }
@@ -84,7 +83,7 @@ int cmd_count_objects(int argc, const char **argv, const char *prefix)
 		OPT_END(),
 	};
 
-	argc = parse_options(argc, argv, opts, count_objects_usage, 0);
+	argc = parse_options(argc, argv, prefix, opts, count_objects_usage, 0);
 	/* we do not take arguments other than flags for now */
 	if (argc)
 		usage_with_options(count_objects_usage, opts);

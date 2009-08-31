@@ -9,25 +9,27 @@
 #include "remote.h"
 #include "transport.h"
 
-static const char receive_pack_usage[] = "git-receive-pack <git-dir>";
+static const char receive_pack_usage[] = "git receive-pack <git-dir>";
 
 enum deny_action {
+	DENY_UNCONFIGURED,
 	DENY_IGNORE,
 	DENY_WARN,
 	DENY_REFUSE,
 };
 
-static int deny_deletes = 0;
-static int deny_non_fast_forwards = 0;
-static enum deny_action deny_current_branch = DENY_WARN;
+static int deny_deletes;
+static int deny_non_fast_forwards;
+static enum deny_action deny_current_branch = DENY_UNCONFIGURED;
+static enum deny_action deny_delete_current = DENY_UNCONFIGURED;
 static int receive_fsck_objects;
 static int receive_unpack_limit = -1;
 static int transfer_unpack_limit = -1;
 static int unpack_limit = 100;
 static int report_status;
-
-static char capabilities[] = " report-status delete-refs ";
-static int capabilities_sent;
+static int prefer_ofs_delta = 1;
+static const char *head_name;
+static char *capabilities_to_send;
 
 static enum deny_action parse_deny_action(const char *var, const char *value)
 {
@@ -76,24 +78,34 @@ static int receive_pack_config(const char *var, const char *value, void *cb)
 		return 0;
 	}
 
+	if (strcmp(var, "receive.denydeletecurrent") == 0) {
+		deny_delete_current = parse_deny_action(var, value);
+		return 0;
+	}
+
+	if (strcmp(var, "repack.usedeltabaseoffset") == 0) {
+		prefer_ofs_delta = git_config_bool(var, value);
+		return 0;
+	}
+
 	return git_default_config(var, value, cb);
 }
 
 static int show_ref(const char *path, const unsigned char *sha1, int flag, void *cb_data)
 {
-	if (capabilities_sent)
+	if (!capabilities_to_send)
 		packet_write(1, "%s %s\n", sha1_to_hex(sha1), path);
 	else
 		packet_write(1, "%s %s%c%s\n",
-			     sha1_to_hex(sha1), path, 0, capabilities);
-	capabilities_sent = 1;
+			     sha1_to_hex(sha1), path, 0, capabilities_to_send);
+	capabilities_to_send = NULL;
 	return 0;
 }
 
 static void write_head_info(void)
 {
 	for_each_ref(show_ref, NULL);
-	if (!capabilities_sent)
+	if (capabilities_to_send)
 		show_ref("capabilities^{}", null_sha1, 0, NULL);
 
 }
@@ -111,32 +123,32 @@ static struct command *commands;
 static const char pre_receive_hook[] = "hooks/pre-receive";
 static const char post_receive_hook[] = "hooks/post-receive";
 
-static int hook_status(int code, const char *hook_name)
+static int run_status(int code, const char *cmd_name)
 {
 	switch (code) {
 	case 0:
 		return 0;
 	case -ERR_RUN_COMMAND_FORK:
-		return error("hook fork failed");
+		return error("fork of %s failed", cmd_name);
 	case -ERR_RUN_COMMAND_EXEC:
-		return error("hook execute failed");
+		return error("execute of %s failed", cmd_name);
 	case -ERR_RUN_COMMAND_PIPE:
-		return error("hook pipe failed");
+		return error("pipe failed");
 	case -ERR_RUN_COMMAND_WAITPID:
 		return error("waitpid failed");
 	case -ERR_RUN_COMMAND_WAITPID_WRONG_PID:
 		return error("waitpid is confused");
 	case -ERR_RUN_COMMAND_WAITPID_SIGNAL:
-		return error("%s died of signal", hook_name);
+		return error("%s died of signal", cmd_name);
 	case -ERR_RUN_COMMAND_WAITPID_NOEXIT:
-		return error("%s died strangely", hook_name);
+		return error("%s died strangely", cmd_name);
 	default:
-		error("%s exited with error code %d", hook_name, -code);
+		error("%s exited with error code %d", cmd_name, -code);
 		return -code;
 	}
 }
 
-static int run_hook(const char *hook_name)
+static int run_receive_hook(const char *hook_name)
 {
 	static char buf[sizeof(commands->old_sha1) * 2 + PATH_MAX + 4];
 	struct command *cmd;
@@ -162,7 +174,7 @@ static int run_hook(const char *hook_name)
 
 	code = start_command(&proc);
 	if (code)
-		return hook_status(code, hook_name);
+		return run_status(code, hook_name);
 	for (cmd = commands; cmd; cmd = cmd->next) {
 		if (!cmd->error_string) {
 			size_t n = snprintf(buf, sizeof(buf), "%s %s %s\n",
@@ -174,13 +186,12 @@ static int run_hook(const char *hook_name)
 		}
 	}
 	close(proc.in);
-	return hook_status(finish_command(&proc), hook_name);
+	return run_status(finish_command(&proc), hook_name);
 }
 
 static int run_update_hook(struct command *cmd)
 {
 	static const char update_hook[] = "hooks/update";
-	struct child_process proc;
 	const char *argv[5];
 
 	if (access(update_hook, X_OK) < 0)
@@ -192,26 +203,74 @@ static int run_update_hook(struct command *cmd)
 	argv[3] = sha1_to_hex(cmd->new_sha1);
 	argv[4] = NULL;
 
-	memset(&proc, 0, sizeof(proc));
-	proc.argv = argv;
-	proc.no_stdin = 1;
-	proc.stdout_to_stderr = 1;
-
-	return hook_status(run_command(&proc), update_hook);
+	return run_status(run_command_v_opt(argv, RUN_COMMAND_NO_STDIN |
+					RUN_COMMAND_STDOUT_TO_STDERR),
+			update_hook);
 }
 
 static int is_ref_checked_out(const char *ref)
 {
-	unsigned char sha1[20];
-	const char *head;
-
 	if (is_bare_repository())
 		return 0;
 
-	head = resolve_ref("HEAD", sha1, 0, NULL);
-	if (!head)
+	if (!head_name)
 		return 0;
-	return !strcmp(head, ref);
+	return !strcmp(head_name, ref);
+}
+
+static char *warn_unconfigured_deny_msg[] = {
+	"Updating the currently checked out branch may cause confusion,",
+	"as the index and work tree do not reflect changes that are in HEAD.",
+	"As a result, you may see the changes you just pushed into it",
+	"reverted when you run 'git diff' over there, and you may want",
+	"to run 'git reset --hard' before starting to work to recover.",
+	"",
+	"You can set 'receive.denyCurrentBranch' configuration variable to",
+	"'refuse' in the remote repository to forbid pushing into its",
+	"current branch."
+	"",
+	"To allow pushing into the current branch, you can set it to 'ignore';",
+	"but this is not recommended unless you arranged to update its work",
+	"tree to match what you pushed in some other way.",
+	"",
+	"To squelch this message, you can set it to 'warn'.",
+	"",
+	"Note that the default will change in a future version of git",
+	"to refuse updating the current branch unless you have the",
+	"configuration variable set to either 'ignore' or 'warn'."
+};
+
+static void warn_unconfigured_deny(void)
+{
+	int i;
+	for (i = 0; i < ARRAY_SIZE(warn_unconfigured_deny_msg); i++)
+		warning("%s", warn_unconfigured_deny_msg[i]);
+}
+
+static char *warn_unconfigured_deny_delete_current_msg[] = {
+	"Deleting the current branch can cause confusion by making the next",
+	"'git clone' not check out any file.",
+	"",
+	"You can set 'receive.denyDeleteCurrent' configuration variable to",
+	"'refuse' in the remote repository to disallow deleting the current",
+	"branch.",
+	"",
+	"You can set it to 'ignore' to allow such a delete without a warning.",
+	"",
+	"To make this warning message less loud, you can set it to 'warn'.",
+	"",
+	"Note that the default will change in a future version of git",
+	"to refuse deleting the current branch unless you have the",
+	"configuration variable set to either 'ignore' or 'warn'."
+};
+
+static void warn_unconfigured_deny_delete_current(void)
+{
+	int i;
+	for (i = 0;
+	     i < ARRAY_SIZE(warn_unconfigured_deny_delete_current_msg);
+	     i++)
+		warning("%s", warn_unconfigured_deny_delete_current_msg[i]);
 }
 
 static const char *update(struct command *cmd)
@@ -227,22 +286,20 @@ static const char *update(struct command *cmd)
 		return "funny refname";
 	}
 
-	switch (deny_current_branch) {
-	case DENY_IGNORE:
-		break;
-	case DENY_WARN:
-		if (!is_ref_checked_out(name))
+	if (is_ref_checked_out(name)) {
+		switch (deny_current_branch) {
+		case DENY_IGNORE:
 			break;
-		warning("updating the currently checked out branch; this may"
-			" cause confusion,\n"
-			"as the index and working tree do not reflect changes"
-			" that are now in HEAD.");
-		break;
-	case DENY_REFUSE:
-		if (!is_ref_checked_out(name))
+		case DENY_UNCONFIGURED:
+		case DENY_WARN:
+			warning("updating the current branch");
+			if (deny_current_branch == DENY_UNCONFIGURED)
+				warn_unconfigured_deny();
 			break;
-		error("refusing to update checked out branch: %s", name);
-		return "branch is currently checked out";
+		case DENY_REFUSE:
+			error("refusing to update checked out branch: %s", name);
+			return "branch is currently checked out";
+		}
 	}
 
 	if (!is_null_sha1(new_sha1) && !has_sha1_file(new_sha1)) {
@@ -250,12 +307,30 @@ static const char *update(struct command *cmd)
 		      "but I can't find it!", sha1_to_hex(new_sha1));
 		return "bad pack";
 	}
-	if (deny_deletes && is_null_sha1(new_sha1) &&
-	    !is_null_sha1(old_sha1) &&
-	    !prefixcmp(name, "refs/heads/")) {
-		error("denying ref deletion for %s", name);
-		return "deletion prohibited";
+
+	if (!is_null_sha1(old_sha1) && is_null_sha1(new_sha1)) {
+		if (deny_deletes && !prefixcmp(name, "refs/heads/")) {
+			error("denying ref deletion for %s", name);
+			return "deletion prohibited";
+		}
+
+		if (!strcmp(name, head_name)) {
+			switch (deny_delete_current) {
+			case DENY_IGNORE:
+				break;
+			case DENY_WARN:
+			case DENY_UNCONFIGURED:
+				if (deny_delete_current == DENY_UNCONFIGURED)
+					warn_unconfigured_deny_delete_current();
+				warning("deleting the current branch");
+				break;
+			case DENY_REFUSE:
+				error("refusing to delete the current branch: %s", name);
+				return "deletion of the current branch prohibited";
+			}
+		}
 	}
+
 	if (deny_non_fast_forwards && !is_null_sha1(new_sha1) &&
 	    !is_null_sha1(old_sha1) &&
 	    !prefixcmp(name, "refs/heads/")) {
@@ -319,7 +394,7 @@ static char update_post_hook[] = "hooks/post-update";
 static void run_update_post_hook(struct command *cmd)
 {
 	struct command *cmd_p;
-	int argc;
+	int argc, status;
 	const char **argv;
 
 	for (argc = 0, cmd_p = cmd; cmd_p; cmd_p = cmd_p->next) {
@@ -342,13 +417,15 @@ static void run_update_post_hook(struct command *cmd)
 		argc++;
 	}
 	argv[argc] = NULL;
-	run_command_v_opt(argv, RUN_COMMAND_NO_STDIN
-		| RUN_COMMAND_STDOUT_TO_STDERR);
+	status = run_command_v_opt(argv, RUN_COMMAND_NO_STDIN
+			| RUN_COMMAND_STDOUT_TO_STDERR);
+	run_status(status, update_post_hook);
 }
 
 static void execute_commands(const char *unpacker_error)
 {
 	struct command *cmd = commands;
+	unsigned char sha1[20];
 
 	if (unpacker_error) {
 		while (cmd) {
@@ -358,13 +435,15 @@ static void execute_commands(const char *unpacker_error)
 		return;
 	}
 
-	if (run_hook(pre_receive_hook)) {
+	if (run_receive_hook(pre_receive_hook)) {
 		while (cmd) {
 			cmd->error_string = "pre-receive hook declined";
 			cmd = cmd->next;
 		}
 		return;
 	}
+
+	head_name = resolve_ref("HEAD", sha1, 0, NULL);
 
 	while (cmd) {
 		cmd->error_string = update(cmd);
@@ -456,24 +535,10 @@ static const char *unpack(void)
 		unpacker[i++] = hdr_arg;
 		unpacker[i++] = NULL;
 		code = run_command_v_opt(unpacker, RUN_GIT_CMD);
-		switch (code) {
-		case 0:
+		if (!code)
 			return NULL;
-		case -ERR_RUN_COMMAND_FORK:
-			return "unpack fork failed";
-		case -ERR_RUN_COMMAND_EXEC:
-			return "unpack execute failed";
-		case -ERR_RUN_COMMAND_WAITPID:
-			return "waitpid failed";
-		case -ERR_RUN_COMMAND_WAITPID_WRONG_PID:
-			return "waitpid is confused";
-		case -ERR_RUN_COMMAND_WAITPID_SIGNAL:
-			return "unpacker died of signal";
-		case -ERR_RUN_COMMAND_WAITPID_NOEXIT:
-			return "unpacker died strangely";
-		default:
-			return "unpacker exited with error code";
-		}
+		run_status(code, unpacker[0]);
+		return "unpack-objects abnormal exit";
 	} else {
 		const char *keeper[7];
 		int s, status, i = 0;
@@ -496,8 +561,11 @@ static const char *unpack(void)
 		ip.argv = keeper;
 		ip.out = -1;
 		ip.git_cmd = 1;
-		if (start_command(&ip))
+		status = start_command(&ip);
+		if (status) {
+			run_status(status, keeper[0]);
 			return "index-pack fork failed";
+		}
 		pack_lockfile = index_pack_lockfile(ip.out);
 		close(ip.out);
 		status = finish_command(&ip);
@@ -505,6 +573,7 @@ static const char *unpack(void)
 			reprepare_packed_git();
 			return NULL;
 		}
+		run_status(status, keeper[0]);
 		return "index-pack abnormal exit";
 	}
 }
@@ -597,7 +666,7 @@ int cmd_receive_pack(int argc, const char **argv, const char *prefix)
 	setup_path();
 
 	if (!enter_repo(dir, 0))
-		die("'%s': unable to chdir or not a git archive", dir);
+		die("'%s' does not appear to be a git repository", dir);
 
 	if (is_repository_shallow())
 		die("attempt to push into a shallow repository");
@@ -608,6 +677,10 @@ int cmd_receive_pack(int argc, const char **argv, const char *prefix)
 		unpack_limit = transfer_unpack_limit;
 	else if (0 <= receive_unpack_limit)
 		unpack_limit = receive_unpack_limit;
+
+	capabilities_to_send = (prefer_ofs_delta) ?
+		" report-status delete-refs ofs-delta " :
+		" report-status delete-refs ";
 
 	add_alternate_refs();
 	write_head_info();
@@ -624,10 +697,10 @@ int cmd_receive_pack(int argc, const char **argv, const char *prefix)
 			unpack_status = unpack();
 		execute_commands(unpack_status);
 		if (pack_lockfile)
-			unlink(pack_lockfile);
+			unlink_or_warn(pack_lockfile);
 		if (report_status)
 			report(unpack_status);
-		run_hook(post_receive_hook);
+		run_receive_hook(post_receive_hook);
 		run_update_post_hook(commands);
 	}
 	return 0;

@@ -1,4 +1,5 @@
 #include "cache.h"
+#include "refs.h"
 
 int prefixcmp(const char *str, const char *prefix)
 {
@@ -139,14 +140,11 @@ void strbuf_list_free(struct strbuf **sbs)
 
 int strbuf_cmp(const struct strbuf *a, const struct strbuf *b)
 {
-	int cmp;
-	if (a->len < b->len) {
-		cmp = memcmp(a->buf, b->buf, a->len);
-		return cmp ? cmp : -1;
-	} else {
-		cmp = memcmp(a->buf, b->buf, b->len);
-		return cmp ? cmp : a->len != b->len;
-	}
+	int len = a->len < b->len ? a->len: b->len;
+	int cmp = memcmp(a->buf, b->buf, len);
+	if (cmp)
+		return cmp;
+	return a->len < b->len ? -1: a->len != b->len;
 }
 
 void strbuf_splice(struct strbuf *sb, size_t pos, size_t len,
@@ -256,18 +254,21 @@ size_t strbuf_expand_dict_cb(struct strbuf *sb, const char *placeholder,
 size_t strbuf_fread(struct strbuf *sb, size_t size, FILE *f)
 {
 	size_t res;
+	size_t oldalloc = sb->alloc;
 
 	strbuf_grow(sb, size);
 	res = fread(sb->buf + sb->len, 1, size, f);
-	if (res > 0) {
+	if (res > 0)
 		strbuf_setlen(sb, sb->len + res);
-	}
+	else if (oldalloc == 0)
+		strbuf_release(sb);
 	return res;
 }
 
 ssize_t strbuf_read(struct strbuf *sb, int fd, size_t hint)
 {
 	size_t oldlen = sb->len;
+	size_t oldalloc = sb->alloc;
 
 	strbuf_grow(sb, hint ? hint : 8192);
 	for (;;) {
@@ -275,7 +276,10 @@ ssize_t strbuf_read(struct strbuf *sb, int fd, size_t hint)
 
 		cnt = xread(fd, sb->buf + sb->len, sb->alloc - sb->len - 1);
 		if (cnt < 0) {
-			strbuf_setlen(sb, oldlen);
+			if (oldalloc == 0)
+				strbuf_release(sb);
+			else
+				strbuf_setlen(sb, oldlen);
 			return -1;
 		}
 		if (!cnt)
@@ -292,6 +296,8 @@ ssize_t strbuf_read(struct strbuf *sb, int fd, size_t hint)
 
 int strbuf_readlink(struct strbuf *sb, const char *path, size_t hint)
 {
+	size_t oldalloc = sb->alloc;
+
 	if (hint < 32)
 		hint = 32;
 
@@ -311,7 +317,8 @@ int strbuf_readlink(struct strbuf *sb, const char *path, size_t hint)
 		/* .. the buffer was too small - try again */
 		hint *= 2;
 	}
-	strbuf_release(sb);
+	if (oldalloc == 0)
+		strbuf_release(sb);
 	return -1;
 }
 
@@ -350,4 +357,20 @@ int strbuf_read_file(struct strbuf *sb, const char *path, size_t hint)
 		return -1;
 
 	return len;
+}
+
+int strbuf_branchname(struct strbuf *sb, const char *name)
+{
+	int len = strlen(name);
+	if (interpret_branch_name(name, sb) == len)
+		return 0;
+	strbuf_add(sb, name, len);
+	return len;
+}
+
+int strbuf_check_branch_ref(struct strbuf *sb, const char *name)
+{
+	strbuf_branchname(sb, name);
+	strbuf_splice(sb, 0, 0, "refs/heads/", 11);
+	return check_ref_format(sb->buf);
 }

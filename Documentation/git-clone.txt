@@ -117,7 +117,7 @@ then the cloned repository will become corrupt.
 --origin <name>::
 -o <name>::
 	Instead of using the remote name 'origin' to keep track
-	of the upstream repository, use <name> instead.
+	of the upstream repository, use <name>.
 
 --upload-pack <upload-pack>::
 -u <upload-pack>::
@@ -149,7 +149,7 @@ then the cloned repository will become corrupt.
 	part of the source repository is used if no directory is
 	explicitly given ("repo" for "/path/to/repo.git" and "foo"
 	for "host.xz:foo/.git").  Cloning into an existing directory
-	is not allowed.
+	is only allowed if the directory is empty.
 
 :git-clone: 1
 include::urls.txt[]

@@ -11,7 +11,7 @@
 #include "list-objects.h"
 #include "run-command.h"
 
-static const char upload_pack_usage[] = "git-upload-pack [--strict] [--timeout=nn] <dir>";
+static const char upload_pack_usage[] = "git upload-pack [--strict] [--timeout=nn] <dir>";
 
 /* bits #0..7 in revision.h, #8..10 in commit.c */
 #define THEY_HAVE	(1u << 11)
@@ -28,7 +28,7 @@ static unsigned long oldest_have;
 
 static int multi_ack, nr_our_refs;
 static int use_thin_pack, use_ofs_delta, use_include_tag;
-static int no_progress;
+static int no_progress, daemon_mode;
 static struct object_array have_obj;
 static struct object_array want_obj;
 static unsigned int timeout;
@@ -66,7 +66,7 @@ static ssize_t send_client_data(int fd, const char *data, ssize_t sz)
 }
 
 static FILE *pack_pipe = NULL;
-static void show_commit(struct commit *commit)
+static void show_commit(struct commit *commit, void *data)
 {
 	if (commit->object.flags & BOUNDARY)
 		fputc('-', pack_pipe);
@@ -78,20 +78,22 @@ static void show_commit(struct commit *commit)
 	commit->buffer = NULL;
 }
 
-static void show_object(struct object_array_entry *p)
+static void show_object(struct object *obj, const struct name_path *path, const char *component)
 {
 	/* An object with name "foo\n0000000..." can be used to
 	 * confuse downstream git-pack-objects very badly.
 	 */
-	const char *ep = strchr(p->name, '\n');
+	const char *name = path_name(path, component);
+	const char *ep = strchr(name, '\n');
 	if (ep) {
-		fprintf(pack_pipe, "%s %.*s\n", sha1_to_hex(p->item->sha1),
-		       (int) (ep - p->name),
-		       p->name);
+		fprintf(pack_pipe, "%s %.*s\n", sha1_to_hex(obj->sha1),
+		       (int) (ep - name),
+		       name);
 	}
 	else
 		fprintf(pack_pipe, "%s %s\n",
-				sha1_to_hex(p->item->sha1), p->name);
+				sha1_to_hex(obj->sha1), name);
+	free((char *)name);
 }
 
 static void show_edge(struct commit *commit)
@@ -134,7 +136,7 @@ static int do_rev_list(int fd, void *create_full_pack)
 	if (prepare_revision_walk(&revs))
 		die("revision walk setup failed");
 	mark_edges_uninteresting(revs.commits, &revs, show_edge);
-	traverse_commit_list(&revs, show_commit, show_object);
+	traverse_commit_list(&revs, show_commit, show_object, NULL);
 	fflush(pack_pipe);
 	fclose(pack_pipe);
 	return 0;
@@ -397,12 +399,11 @@ static int get_common_commits(void)
 	static char line[1000];
 	unsigned char sha1[20];
 	char hex[41], last_hex[41];
-	int len;
 
 	save_commit_buffer = 0;
 
 	for(;;) {
-		len = packet_read_line(0, line, sizeof(line));
+		int len = packet_read_line(0, line, sizeof(line));
 		reset_timeout();
 
 		if (!len) {
@@ -410,7 +411,7 @@ static int get_common_commits(void)
 				packet_write(1, "NAK\n");
 			continue;
 		}
-		len = strip(line, len);
+		strip(line, len);
 		if (!prefixcmp(line, "have ")) {
 			switch (got_sha1(line+5, sha1)) {
 			case -1: /* they have what we do not */
@@ -520,6 +521,10 @@ static void receive_needs(void)
 	}
 	if (debug_fd)
 		write_in_full(debug_fd, "#E\n", 3);
+
+	if (!use_sideband && daemon_mode)
+		no_progress = 1;
+
 	if (depth == 0 && shallows.nr == 0)
 		return;
 	if (depth > 0) {
@@ -616,6 +621,8 @@ int main(int argc, char **argv)
 	int i;
 	int strict = 0;
 
+	git_extract_argv0_path(argv[0]);
+
 	for (i = 1; i < argc; i++) {
 		char *arg = argv[i];
 
@@ -627,6 +634,7 @@ int main(int argc, char **argv)
 		}
 		if (!prefixcmp(arg, "--timeout=")) {
 			timeout = atoi(arg+10);
+			daemon_mode = 1;
 			continue;
 		}
 		if (!strcmp(arg, "--")) {
@@ -643,7 +651,7 @@ int main(int argc, char **argv)
 	dir = argv[i];
 
 	if (!enter_repo(dir, strict))
-		die("'%s': unable to chdir or not a git archive", dir);
+		die("'%s' does not appear to be a git repository", dir);
 	if (is_repository_shallow())
 		die("attempt to fetch/clone from a shallow repository");
 	if (getenv("GIT_DEBUG_SEND_PACK"))

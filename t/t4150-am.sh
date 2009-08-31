@@ -180,6 +180,17 @@ test_expect_success 'am -3 falls back to 3-way merge' '
 	test -z "$(git diff lorem)"
 '
 
+test_expect_success 'am -3 -q is quiet' '
+	git reset master2 --hard &&
+	sed -n -e "3,\$p" msg >file &&
+	head -n 9 msg >>file &&
+	git add file &&
+	test_tick &&
+	git commit -m "copied stuff" &&
+	git am -3 -q lorem-move.patch > output.out 2>&1 &&
+	! test -s output.out
+'
+
 test_expect_success 'am pauses on conflict' '
 	git checkout lorem2^^ &&
 	test_must_fail git am lorem-move.patch &&
@@ -255,6 +266,69 @@ test_expect_success 'am works from file (absolute path given) in subdirectory' '
 		git am "$P/patch1"
 	) &&
 	test -z "$(git diff second)"
+'
+
+test_expect_success 'am --committer-date-is-author-date' '
+	git checkout first &&
+	test_tick &&
+	git am --committer-date-is-author-date patch1 &&
+	git cat-file commit HEAD | sed -e "/^$/q" >head1 &&
+	at=$(sed -ne "/^author /s/.*> //p" head1) &&
+	ct=$(sed -ne "/^committer /s/.*> //p" head1) &&
+	test "$at" = "$ct"
+'
+
+test_expect_success 'am without --committer-date-is-author-date' '
+	git checkout first &&
+	test_tick &&
+	git am patch1 &&
+	git cat-file commit HEAD | sed -e "/^$/q" >head1 &&
+	at=$(sed -ne "/^author /s/.*> //p" head1) &&
+	ct=$(sed -ne "/^committer /s/.*> //p" head1) &&
+	test "$at" != "$ct"
+'
+
+# This checks for +0000 because TZ is set to UTC and that should
+# show up when the current time is used. The date in message is set
+# by test_tick that uses -0700 timezone; if this feature does not
+# work, we will see that instead of +0000.
+test_expect_success 'am --ignore-date' '
+	git checkout first &&
+	test_tick &&
+	git am --ignore-date patch1 &&
+	git cat-file commit HEAD | sed -e "/^$/q" >head1 &&
+	at=$(sed -ne "/^author /s/.*> //p" head1) &&
+	echo "$at" | grep "+0000"
+'
+
+test_expect_success 'am into an unborn branch' '
+	rm -fr subdir &&
+	mkdir -p subdir &&
+	git format-patch --numbered-files -o subdir -1 first &&
+	(
+		cd subdir &&
+		git init &&
+		git am 1
+	) &&
+	result=$(
+		cd subdir && git rev-parse HEAD^{tree}
+	) &&
+	test "z$result" = "z$(git rev-parse first^{tree})"
+'
+
+test_expect_success 'am newline in subject' '
+	git checkout first &&
+	test_tick &&
+	sed -e "s/second/second \\\n foo/" patch1 > patchnl &&
+	git am < patchnl > output.out 2>&1 &&
+	grep "^Applying: second \\\n foo$" output.out
+'
+
+test_expect_success 'am -q is quiet' '
+	git checkout first &&
+	test_tick &&
+	git am -q < patch1 > output.out 2>&1 &&
+	! test -s output.out
 '
 
 test_done

@@ -21,12 +21,12 @@ typedef int pid_t;
 #define WEXITSTATUS(x) ((x) & 0xff)
 #define WIFSIGNALED(x) ((unsigned)(x) > 259)
 
-#define SIGKILL 0
-#define SIGCHLD 0
-#define SIGPIPE 0
-#define SIGHUP 0
-#define SIGQUIT 0
-#define SIGALRM 100
+#define SIGHUP 1
+#define SIGQUIT 3
+#define SIGKILL 9
+#define SIGPIPE 13
+#define SIGALRM 14
+#define SIGCHLD 17
 
 #define F_GETFD 1
 #define F_SETFD 2
@@ -37,6 +37,8 @@ struct passwd {
 	char *pw_gecos;
 	char *pw_dir;
 };
+
+extern char *getpass(const char *prompt);
 
 struct pollfd {
 	int fd;           /* file descriptor */
@@ -67,8 +69,6 @@ static inline int readlink(const char *path, char *buf, size_t bufsiz)
 { errno = ENOSYS; return -1; }
 static inline int symlink(const char *oldpath, const char *newpath)
 { errno = ENOSYS; return -1; }
-static inline int link(const char *oldpath, const char *newpath)
-{ errno = ENOSYS; return -1; }
 static inline int fchmod(int fildes, mode_t mode)
 { errno = ENOSYS; return -1; }
 static inline int fork(void)
@@ -92,6 +92,8 @@ static inline int fcntl(int fd, int cmd, long arg)
 	errno = EINVAL;
 	return -1;
 }
+/* bash cannot reliably detect negative return codes as failure */
+#define exit(code) exit((code) & 0xff)
 
 /*
  * simple adaptors
@@ -111,7 +113,7 @@ static inline int mingw_unlink(const char *pathname)
 }
 #define unlink mingw_unlink
 
-static inline int waitpid(pid_t pid, unsigned *status, unsigned options)
+static inline int waitpid(pid_t pid, int *status, unsigned options)
 {
 	if (options == 0)
 		return _cwait(status, pid, 0);
@@ -134,6 +136,7 @@ int getpagesize(void);	/* defined in MinGW's libgcc.a */
 struct passwd *getpwuid(int uid);
 int setitimer(int type, struct itimerval *in, struct itimerval *out);
 int sigaction(int sig, struct sigaction *in, struct sigaction *out);
+int link(const char *oldpath, const char *newpath);
 
 /*
  * replacements of existing functions
@@ -160,14 +163,22 @@ int mingw_connect(int sockfd, struct sockaddr *sa, size_t sz);
 int mingw_rename(const char*, const char*);
 #define rename mingw_rename
 
+#ifdef USE_WIN32_MMAP
+int mingw_getpagesize(void);
+#define getpagesize mingw_getpagesize
+#endif
+
 /* Use mingw_lstat() instead of lstat()/stat() and
  * mingw_fstat() instead of fstat() on Windows.
  */
+#define off_t off64_t
+#define stat _stati64
+#define lseek _lseeki64
 int mingw_lstat(const char *file_name, struct stat *buf);
 int mingw_fstat(int fd, struct stat *buf);
 #define fstat mingw_fstat
 #define lstat mingw_lstat
-#define stat(x,y) mingw_lstat(x,y)
+#define _stati64(x,y) mingw_lstat(x,y)
 
 int mingw_utime(const char *file_name, const struct utimbuf *times);
 #define utime mingw_utime
@@ -226,3 +237,32 @@ int main(int argc, const char **argv) \
 	return mingw_main(argc, argv); \
 } \
 static int mingw_main(c,v)
+
+#ifndef NO_MINGW_REPLACE_READDIR
+/*
+ * A replacement of readdir, to ensure that it reads the file type at
+ * the same time. This avoid extra unneeded lstats in git on MinGW
+ */
+#undef DT_UNKNOWN
+#undef DT_DIR
+#undef DT_REG
+#undef DT_LNK
+#define DT_UNKNOWN	0
+#define DT_DIR		1
+#define DT_REG		2
+#define DT_LNK		3
+
+struct mingw_dirent
+{
+	long		d_ino;			/* Always zero. */
+	union {
+		unsigned short	d_reclen;	/* Always zero. */
+		unsigned char   d_type;		/* Reimplementation adds this */
+	};
+	unsigned short	d_namlen;		/* Length of name in d_name. */
+	char		d_name[FILENAME_MAX];	/* File name. */
+};
+#define dirent mingw_dirent
+#define readdir(x) mingw_readdir(x)
+struct dirent *mingw_readdir(DIR *dir);
+#endif // !NO_MINGW_REPLACE_READDIR

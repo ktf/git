@@ -115,7 +115,7 @@ if test -z "$browser" ; then
 	browser_candidates="open $browser_candidates"
     fi
     # /bin/start indicates MinGW
-    if test -n /bin/start; then
+    if test -x /bin/start; then
 	browser_candidates="start $browser_candidates"
     fi
 
@@ -161,9 +161,12 @@ case "$browser" in
 		;;
 	esac
 	;;
-    w3m|links|lynx|open|start)
+    w3m|links|lynx|open)
 	eval "$browser_path" "$@"
 	;;
+    start)
+        exec "$browser_path" '"web-browse"' "$@"
+        ;;
     dillo)
 	"$browser_path" "$@" &
 	;;

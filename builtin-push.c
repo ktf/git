@@ -10,7 +10,7 @@
 #include "parse-options.h"
 
 static const char * const push_usage[] = {
-	"git push [--all | --mirror] [--dry-run] [--tags] [--receive-pack=<git-receive-pack>] [--repo=<repository>] [-f | --force] [-v] [<repository> <refspec>...]",
+	"git push [--all | --mirror] [--dry-run] [--porcelain] [--tags] [--receive-pack=<git-receive-pack>] [--repo=<repository>] [-f | --force] [-v] [<repository> <refspec>...]",
 	NULL,
 };
 
@@ -48,13 +48,58 @@ static void set_refspecs(const char **refs, int nr)
 	}
 }
 
+static void setup_push_tracking(void)
+{
+	struct strbuf refspec = STRBUF_INIT;
+	struct branch *branch = branch_get(NULL);
+	if (!branch)
+		die("You are not currently on a branch.");
+	if (!branch->merge_nr)
+		die("The current branch %s is not tracking anything.",
+		    branch->name);
+	if (branch->merge_nr != 1)
+		die("The current branch %s is tracking multiple branches, "
+		    "refusing to push.", branch->name);
+	strbuf_addf(&refspec, "%s:%s", branch->name, branch->merge[0]->src);
+	add_refspec(refspec.buf);
+}
+
+static void setup_default_push_refspecs(void)
+{
+	git_config(git_default_config, NULL);
+	switch (push_default) {
+	default:
+	case PUSH_DEFAULT_MATCHING:
+		add_refspec(":");
+		break;
+
+	case PUSH_DEFAULT_TRACKING:
+		setup_push_tracking();
+		break;
+
+	case PUSH_DEFAULT_CURRENT:
+		add_refspec("HEAD");
+		break;
+
+	case PUSH_DEFAULT_NOTHING:
+		die("You didn't specify any refspecs to push, and "
+		    "push.default is \"nothing\".");
+		break;
+	}
+}
+
 static int do_push(const char *repo, int flags)
 {
 	int i, errs;
 	struct remote *remote = remote_get(repo);
+	const char **url;
+	int url_nr;
 
-	if (!remote)
-		die("bad repository '%s'", repo);
+	if (!remote) {
+		if (repo)
+			die("bad repository '%s'", repo);
+		die("No destination configured to push to.");
+	}
 
 	if (remote->mirror)
 		flags |= (TRANSPORT_PUSH_MIRROR|TRANSPORT_PUSH_FORCE);
@@ -76,16 +121,24 @@ static int do_push(const char *repo, int flags)
 		return error("--all and --mirror are incompatible");
 	}
 
-	if (!refspec
-		&& !(flags & TRANSPORT_PUSH_ALL)
-		&& remote->push_refspec_nr) {
-		refspec = remote->push_refspec;
-		refspec_nr = remote->push_refspec_nr;
+	if (!refspec && !(flags & TRANSPORT_PUSH_ALL)) {
+		if (remote->push_refspec_nr) {
+			refspec = remote->push_refspec;
+			refspec_nr = remote->push_refspec_nr;
+		} else if (!(flags & TRANSPORT_PUSH_MIRROR))
+			setup_default_push_refspecs();
 	}
 	errs = 0;
-	for (i = 0; i < remote->url_nr; i++) {
+	if (remote->pushurl_nr) {
+		url = remote->pushurl;
+		url_nr = remote->pushurl_nr;
+	} else {
+		url = remote->url;
+		url_nr = remote->url_nr;
+	}
+	for (i = 0; i < url_nr; i++) {
 		struct transport *transport =
-			transport_get(remote, remote->url[i]);
+			transport_get(remote, url[i]);
 		int err;
 		if (receivepack)
 			transport_set_option(transport,
@@ -94,14 +147,14 @@ static int do_push(const char *repo, int flags)
 			transport_set_option(transport, TRANS_OPT_THIN, "yes");
 
 		if (flags & TRANSPORT_PUSH_VERBOSE)
-			fprintf(stderr, "Pushing to %s\n", remote->url[i]);
+			fprintf(stderr, "Pushing to %s\n", url[i]);
 		err = transport_push(transport, refspec_nr, refspec, flags);
 		err |= transport_disconnect(transport);
 
 		if (!err)
 			continue;
 
-		error("failed to push some refs to '%s'", remote->url[i]);
+		error("failed to push some refs to '%s'", url[i]);
 		errs++;
 	}
 	return !!errs;
@@ -122,6 +175,7 @@ int cmd_push(int argc, const char **argv, const char *prefix)
 			    (TRANSPORT_PUSH_MIRROR|TRANSPORT_PUSH_FORCE)),
 		OPT_BOOLEAN( 0 , "tags", &tags, "push tags"),
 		OPT_BIT( 0 , "dry-run", &flags, "dry run", TRANSPORT_PUSH_DRY_RUN),
+		OPT_BIT( 0,  "porcelain", &flags, "machine-readable output", TRANSPORT_PUSH_PORCELAIN),
 		OPT_BIT('f', "force", &flags, "force updates", TRANSPORT_PUSH_FORCE),
 		OPT_BOOLEAN( 0 , "thin", &thin, "use thin pack"),
 		OPT_STRING( 0 , "receive-pack", &receivepack, "receive-pack", "receive pack program"),
@@ -129,7 +183,7 @@ int cmd_push(int argc, const char **argv, const char *prefix)
 		OPT_END()
 	};
 
-	argc = parse_options(argc, argv, options, push_usage, 0);
+	argc = parse_options(argc, argv, prefix, options, push_usage, 0);
 
 	if (tags)
 		add_refspec("refs/tags/*");

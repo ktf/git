@@ -6,12 +6,16 @@ test_description='Test export of commits to CVS'
 
 . ./test-lib.sh
 
+if ! test_have_prereq PERL; then
+	say 'skipping git cvsexportcommit tests, perl not available'
+	test_done
+fi
+
 cvs >/dev/null 2>&1
 if test $? -ne 1
 then
-    test_expect_success 'skipping git cvsexportcommit tests, cvs not found' :
+    say 'skipping git cvsexportcommit tests, cvs not found'
     test_done
-    exit
 fi
 
 CVSROOT=$(pwd)/cvsroot
@@ -225,11 +229,12 @@ test_expect_success \
       test_must_fail git cvsexportcommit -c $id
       )'
 
-case "$(git config --bool core.filemode)" in
-false)
-	;;
-*)
-test_expect_success \
+if ! test "$(git config --bool core.filemode)" = false
+then
+	test_set_prereq FILEMODE
+fi
+
+test_expect_success FILEMODE \
      'Retain execute bit' \
      'mkdir G &&
       echo executeon >G/on &&
@@ -243,8 +248,6 @@ test_expect_success \
       test -x G/on &&
       ! test -x G/off
       )'
-	;;
-esac
 
 test_expect_success '-w option should work with relative GIT_DIR' '
       mkdir W &&
@@ -285,6 +288,27 @@ test_expect_success 'check files before directories' '
 
 '
 
+test_expect_success 're-commit a removed filename which remains in CVS attic' '
+
+    (cd "$CVSWORK" &&
+     echo >attic_gremlin &&
+     cvs -Q add attic_gremlin &&
+     cvs -Q ci -m "added attic_gremlin" &&
+     rm attic_gremlin &&
+     cvs -Q rm attic_gremlin &&
+     cvs -Q ci -m "removed attic_gremlin") &&
+
+    echo > attic_gremlin &&
+    git add attic_gremlin &&
+    git commit -m "Added attic_gremlin" &&
+	git cvsexportcommit -w "$CVSWORK" -c HEAD &&
+    (cd "$CVSWORK"; cvs -Q update -d) &&
+    test -f "$CVSWORK/attic_gremlin"
+'
+
+# the state of the CVS sandbox may be indeterminate for ' space'
+# after this test on some platforms / with some versions of CVS
+# consider adding new tests above this point
 test_expect_success 'commit a file with leading spaces in the name' '
 
 	echo space > " space" &&
@@ -292,7 +316,7 @@ test_expect_success 'commit a file with leading spaces in the name' '
 	git commit -m "Add a file with a leading space" &&
 	id=$(git rev-parse HEAD) &&
 	git cvsexportcommit -w "$CVSWORK" -c $id &&
-	check_entries "$CVSWORK" " space/1.1/|DS/1.1/|release-notes/1.2/" &&
+	check_entries "$CVSWORK" " space/1.1/|DS/1.1/|attic_gremlin/1.3/|release-notes/1.2/" &&
 	test_cmp "$CVSWORK/ space" " space"
 
 '

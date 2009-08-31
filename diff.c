@@ -12,6 +12,7 @@
 #include "run-command.h"
 #include "utf8.h"
 #include "userdiff.h"
+#include "sigchain.h"
 
 #ifdef NO_FAST_WORKING_DIRECTORY
 #define FAST_WORKING_DIRECTORY 0
@@ -23,19 +24,20 @@ static int diff_detect_rename_default;
 static int diff_rename_limit_default = 200;
 static int diff_suppress_blank_empty;
 int diff_use_color_default = -1;
+static const char *diff_word_regex_cfg;
 static const char *external_diff_cmd_cfg;
 int diff_auto_refresh_index = 1;
 static int diff_mnemonic_prefix;
 
 static char diff_colors[][COLOR_MAXLEN] = {
-	"\033[m",	/* reset */
-	"",		/* PLAIN (normal) */
-	"\033[1m",	/* METAINFO (bold) */
-	"\033[36m",	/* FRAGINFO (cyan) */
-	"\033[31m",	/* OLD (red) */
-	"\033[32m",	/* NEW (green) */
-	"\033[33m",	/* COMMIT (yellow) */
-	"\033[41m",	/* WHITESPACE (red background) */
+	GIT_COLOR_RESET,
+	GIT_COLOR_NORMAL,	/* PLAIN */
+	GIT_COLOR_BOLD,		/* METAINFO */
+	GIT_COLOR_CYAN,		/* FRAGINFO */
+	GIT_COLOR_RED,		/* OLD */
+	GIT_COLOR_GREEN,	/* NEW */
+	GIT_COLOR_YELLOW,	/* COMMIT */
+	GIT_COLOR_BG_RED,	/* WHITESPACE */
 };
 
 static void diff_filespec_load_driver(struct diff_filespec *one);
@@ -60,6 +62,15 @@ static int parse_diff_color_slot(const char *var, int ofs)
 	die("bad config variable '%s'", var);
 }
 
+static int git_config_rename(const char *var, const char *value)
+{
+	if (!value)
+		return DIFF_DETECT_RENAME;
+	if (!strcasecmp(value, "copies") || !strcasecmp(value, "copy"))
+		return  DIFF_DETECT_COPY;
+	return git_config_bool(var,value) ? DIFF_DETECT_RENAME : 0;
+}
+
 /*
  * These are to give UI layer defaults.
  * The core-level commands such as git-diff-files should
@@ -73,13 +84,7 @@ int git_diff_ui_config(const char *var, const char *value, void *cb)
 		return 0;
 	}
 	if (!strcmp(var, "diff.renames")) {
-		if (!value)
-			diff_detect_rename_default = DIFF_DETECT_RENAME;
-		else if (!strcasecmp(value, "copies") ||
-			 !strcasecmp(value, "copy"))
-			diff_detect_rename_default = DIFF_DETECT_COPY;
-		else if (git_config_bool(var,value))
-			diff_detect_rename_default = DIFF_DETECT_RENAME;
+		diff_detect_rename_default = git_config_rename(var, value);
 		return 0;
 	}
 	if (!strcmp(var, "diff.autorefreshindex")) {
@@ -92,6 +97,8 @@ int git_diff_ui_config(const char *var, const char *value, void *cb)
 	}
 	if (!strcmp(var, "diff.external"))
 		return git_config_string(&external_diff_cmd_cfg, var, value);
+	if (!strcmp(var, "diff.wordregex"))
+		return git_config_string(&diff_word_regex_cfg, var, value);
 
 	return git_diff_basic_config(var, value, cb);
 }
@@ -118,7 +125,9 @@ int git_diff_basic_config(const char *var, const char *value, void *cb)
 	}
 
 	/* like GNU diff's --suppress-blank-empty option  */
-	if (!strcmp(var, "diff.suppress-blank-empty")) {
+	if (!strcmp(var, "diff.suppressblankempty") ||
+			/* for backwards compatibility */
+			!strcmp(var, "diff.suppress-blank-empty")) {
 		diff_suppress_blank_empty = git_config_bool(var, value);
 		return 0;
 	}
@@ -164,6 +173,33 @@ static struct diff_tempfile {
 	char mode[10];
 	char tmp_path[PATH_MAX];
 } diff_temp[2];
+
+static struct diff_tempfile *claim_diff_tempfile(void) {
+	int i;
+	for (i = 0; i < ARRAY_SIZE(diff_temp); i++)
+		if (!diff_temp[i].name)
+			return diff_temp + i;
+	die("BUG: diff is failing to clean up its tempfiles");
+}
+
+static int remove_tempfile_installed;
+
+static void remove_tempfile(void)
+{
+	int i;
+	for (i = 0; i < ARRAY_SIZE(diff_temp); i++) {
+		if (diff_temp[i].name == diff_temp[i].tmp_path)
+			unlink_or_warn(diff_temp[i].name);
+		diff_temp[i].name = NULL;
+	}
+}
+
+static void remove_tempfile_on_signal(int signo)
+{
+	remove_tempfile();
+	sigchain_pop(signo);
+	raise(signo);
+}
 
 static int count_lines(const char *data, int size)
 {
@@ -319,82 +355,138 @@ static int fill_mmfile(mmfile_t *mf, struct diff_filespec *one)
 struct diff_words_buffer {
 	mmfile_t text;
 	long alloc;
-	long current; /* output pointer */
-	int suppressed_newline;
+	struct diff_words_orig {
+		const char *begin, *end;
+	} *orig;
+	int orig_nr, orig_alloc;
 };
 
 static void diff_words_append(char *line, unsigned long len,
 		struct diff_words_buffer *buffer)
 {
-	if (buffer->text.size + len > buffer->alloc) {
-		buffer->alloc = (buffer->text.size + len) * 3 / 2;
-		buffer->text.ptr = xrealloc(buffer->text.ptr, buffer->alloc);
-	}
+	ALLOC_GROW(buffer->text.ptr, buffer->text.size + len, buffer->alloc);
 	line++;
 	len--;
 	memcpy(buffer->text.ptr + buffer->text.size, line, len);
 	buffer->text.size += len;
+	buffer->text.ptr[buffer->text.size] = '\0';
 }
 
 struct diff_words_data {
 	struct diff_words_buffer minus, plus;
+	const char *current_plus;
 	FILE *file;
+	regex_t *word_regex;
 };
-
-static void print_word(FILE *file, struct diff_words_buffer *buffer, int len, int color,
-		int suppress_newline)
-{
-	const char *ptr;
-	int eol = 0;
-
-	if (len == 0)
-		return;
-
-	ptr  = buffer->text.ptr + buffer->current;
-	buffer->current += len;
-
-	if (ptr[len - 1] == '\n') {
-		eol = 1;
-		len--;
-	}
-
-	fputs(diff_get_color(1, color), file);
-	fwrite(ptr, len, 1, file);
-	fputs(diff_get_color(1, DIFF_RESET), file);
-
-	if (eol) {
-		if (suppress_newline)
-			buffer->suppressed_newline = 1;
-		else
-			putc('\n', file);
-	}
-}
 
 static void fn_out_diff_words_aux(void *priv, char *line, unsigned long len)
 {
 	struct diff_words_data *diff_words = priv;
+	int minus_first, minus_len, plus_first, plus_len;
+	const char *minus_begin, *minus_end, *plus_begin, *plus_end;
 
-	if (diff_words->minus.suppressed_newline) {
-		if (line[0] != '+')
-			putc('\n', diff_words->file);
-		diff_words->minus.suppressed_newline = 0;
+	if (line[0] != '@' || parse_hunk_header(line, len,
+			&minus_first, &minus_len, &plus_first, &plus_len))
+		return;
+
+	/* POSIX requires that first be decremented by one if len == 0... */
+	if (minus_len) {
+		minus_begin = diff_words->minus.orig[minus_first].begin;
+		minus_end =
+			diff_words->minus.orig[minus_first + minus_len - 1].end;
+	} else
+		minus_begin = minus_end =
+			diff_words->minus.orig[minus_first].end;
+
+	if (plus_len) {
+		plus_begin = diff_words->plus.orig[plus_first].begin;
+		plus_end = diff_words->plus.orig[plus_first + plus_len - 1].end;
+	} else
+		plus_begin = plus_end = diff_words->plus.orig[plus_first].end;
+
+	if (diff_words->current_plus != plus_begin)
+		fwrite(diff_words->current_plus,
+				plus_begin - diff_words->current_plus, 1,
+				diff_words->file);
+	if (minus_begin != minus_end)
+		color_fwrite_lines(diff_words->file,
+				diff_get_color(1, DIFF_FILE_OLD),
+				minus_end - minus_begin, minus_begin);
+	if (plus_begin != plus_end)
+		color_fwrite_lines(diff_words->file,
+				diff_get_color(1, DIFF_FILE_NEW),
+				plus_end - plus_begin, plus_begin);
+
+	diff_words->current_plus = plus_end;
+}
+
+/* This function starts looking at *begin, and returns 0 iff a word was found. */
+static int find_word_boundaries(mmfile_t *buffer, regex_t *word_regex,
+		int *begin, int *end)
+{
+	if (word_regex && *begin < buffer->size) {
+		regmatch_t match[1];
+		if (!regexec(word_regex, buffer->ptr + *begin, 1, match, 0)) {
+			char *p = memchr(buffer->ptr + *begin + match[0].rm_so,
+					'\n', match[0].rm_eo - match[0].rm_so);
+			*end = p ? p - buffer->ptr : match[0].rm_eo + *begin;
+			*begin += match[0].rm_so;
+			return *begin >= *end;
+		}
+		return -1;
 	}
 
-	len--;
-	switch (line[0]) {
-		case '-':
-			print_word(diff_words->file,
-				   &diff_words->minus, len, DIFF_FILE_OLD, 1);
-			break;
-		case '+':
-			print_word(diff_words->file,
-				   &diff_words->plus, len, DIFF_FILE_NEW, 0);
-			break;
-		case ' ':
-			print_word(diff_words->file,
-				   &diff_words->plus, len, DIFF_PLAIN, 0);
-			diff_words->minus.current += len;
-			break;
+	/* find the next word */
+	while (*begin < buffer->size && isspace(buffer->ptr[*begin]))
+		(*begin)++;
+	if (*begin >= buffer->size)
+		return -1;
+
+	/* find the end of the word */
+	*end = *begin + 1;
+	while (*end < buffer->size && !isspace(buffer->ptr[*end]))
+		(*end)++;
+
+	return 0;
+}
+
+/*
+ * This function splits the words in buffer->text, stores the list with
+ * newline separator into out, and saves the offsets of the original words
+ * in buffer->orig.
+ */
+static void diff_words_fill(struct diff_words_buffer *buffer, mmfile_t *out,
+		regex_t *word_regex)
+{
+	int i, j;
+	long alloc = 0;
+
+	out->size = 0;
+	out->ptr = NULL;
+
+	/* fake an empty "0th" word */
+	ALLOC_GROW(buffer->orig, 1, buffer->orig_alloc);
+	buffer->orig[0].begin = buffer->orig[0].end = buffer->text.ptr;
+	buffer->orig_nr = 1;
+
+	for (i = 0; i < buffer->text.size; i++) {
+		if (find_word_boundaries(&buffer->text, word_regex, &i, &j))
+			return;
+
+		/* store original boundaries */
+		ALLOC_GROW(buffer->orig, buffer->orig_nr + 1,
+				buffer->orig_alloc);
+		buffer->orig[buffer->orig_nr].begin = buffer->text.ptr + i;
+		buffer->orig[buffer->orig_nr].end = buffer->text.ptr + j;
+		buffer->orig_nr++;
+
+		/* store one word */
+		ALLOC_GROW(out->ptr, out->size + j - i + 1, alloc);
+		memcpy(out->ptr + out->size, buffer->text.ptr + i, j - i);
+		out->ptr[out->size + j - i] = '\n';
+		out->size += j - i + 1;
+
+		i = j - 1;
 	}
 }
 
@@ -405,38 +497,36 @@ static void diff_words_show(struct diff_words_data *diff_words)
 	xdemitconf_t xecfg;
 	xdemitcb_t ecb;
 	mmfile_t minus, plus;
-	int i;
+
+	/* special case: only removal */
+	if (!diff_words->plus.text.size) {
+		color_fwrite_lines(diff_words->file,
+			diff_get_color(1, DIFF_FILE_OLD),
+			diff_words->minus.text.size, diff_words->minus.text.ptr);
+		diff_words->minus.text.size = 0;
+		return;
+	}
+
+	diff_words->current_plus = diff_words->plus.text.ptr;
 
 	memset(&xpp, 0, sizeof(xpp));
 	memset(&xecfg, 0, sizeof(xecfg));
-	minus.size = diff_words->minus.text.size;
-	minus.ptr = xmalloc(minus.size);
-	memcpy(minus.ptr, diff_words->minus.text.ptr, minus.size);
-	for (i = 0; i < minus.size; i++)
-		if (isspace(minus.ptr[i]))
-			minus.ptr[i] = '\n';
-	diff_words->minus.current = 0;
-
-	plus.size = diff_words->plus.text.size;
-	plus.ptr = xmalloc(plus.size);
-	memcpy(plus.ptr, diff_words->plus.text.ptr, plus.size);
-	for (i = 0; i < plus.size; i++)
-		if (isspace(plus.ptr[i]))
-			plus.ptr[i] = '\n';
-	diff_words->plus.current = 0;
-
+	diff_words_fill(&diff_words->minus, &minus, diff_words->word_regex);
+	diff_words_fill(&diff_words->plus, &plus, diff_words->word_regex);
 	xpp.flags = XDF_NEED_MINIMAL;
-	xecfg.ctxlen = diff_words->minus.alloc + diff_words->plus.alloc;
+	/* as only the hunk header will be parsed, we need a 0-context */
+	xecfg.ctxlen = 0;
 	xdi_diff_outf(&minus, &plus, fn_out_diff_words_aux, diff_words,
 		      &xpp, &xecfg, &ecb);
 	free(minus.ptr);
 	free(plus.ptr);
+	if (diff_words->current_plus != diff_words->plus.text.ptr +
+			diff_words->plus.text.size)
+		fwrite(diff_words->current_plus,
+			diff_words->plus.text.ptr + diff_words->plus.text.size
+			- diff_words->current_plus, 1,
+			diff_words->file);
 	diff_words->minus.text.size = diff_words->plus.text.size = 0;
-
-	if (diff_words->minus.suppressed_newline) {
-		putc('\n', diff_words->file);
-		diff_words->minus.suppressed_newline = 0;
-	}
 }
 
 typedef unsigned long (*sane_truncate_fn)(char *line, unsigned long len);
@@ -460,7 +550,10 @@ static void free_diff_words_data(struct emit_callback *ecbdata)
 			diff_words_show(ecbdata->diff_words);
 
 		free (ecbdata->diff_words->minus.text.ptr);
+		free (ecbdata->diff_words->minus.orig);
 		free (ecbdata->diff_words->plus.text.ptr);
+		free (ecbdata->diff_words->plus.orig);
+		free(ecbdata->diff_words->word_regex);
 		free(ecbdata->diff_words);
 		ecbdata->diff_words = NULL;
 	}
@@ -746,10 +839,9 @@ static int scale_linear(int it, int width, int max_change)
 }
 
 static void show_name(FILE *file,
-		      const char *prefix, const char *name, int len,
-		      const char *reset, const char *set)
+		      const char *prefix, const char *name, int len)
 {
-	fprintf(file, " %s%s%-*s%s |", set, prefix, len, name, reset);
+	fprintf(file, " %s%-*s |", prefix, len, name);
 }
 
 static void show_graph(FILE *file, char ch, int cnt, const char *set, const char *reset)
@@ -783,9 +875,9 @@ static void fill_print_name(struct diffstat_file *file)
 	file->print_name = pname;
 }
 
-static void show_stats(struct diffstat_t* data, struct diff_options *options)
+static void show_stats(struct diffstat_t *data, struct diff_options *options)
 {
-	int i, len, add, del, total, adds = 0, dels = 0;
+	int i, len, add, del, adds = 0, dels = 0;
 	int max_change = 0, max_len = 0;
 	int total_files = data->nr;
 	int width, name_width;
@@ -863,7 +955,7 @@ static void show_stats(struct diffstat_t* data, struct diff_options *options)
 		}
 
 		if (data->files[i]->is_binary) {
-			show_name(options->file, prefix, name, len, reset, set);
+			show_name(options->file, prefix, name, len);
 			fprintf(options->file, "  Bin ");
 			fprintf(options->file, "%s%d%s", del_c, deleted, reset);
 			fprintf(options->file, " -> ");
@@ -873,7 +965,7 @@ static void show_stats(struct diffstat_t* data, struct diff_options *options)
 			continue;
 		}
 		else if (data->files[i]->is_unmerged) {
-			show_name(options->file, prefix, name, len, reset, set);
+			show_name(options->file, prefix, name, len);
 			fprintf(options->file, "  Unmerged\n");
 			continue;
 		}
@@ -888,16 +980,14 @@ static void show_stats(struct diffstat_t* data, struct diff_options *options)
 		 */
 		add = added;
 		del = deleted;
-		total = add + del;
 		adds += add;
 		dels += del;
 
 		if (width <= max_change) {
 			add = scale_linear(add, width, max_change);
 			del = scale_linear(del, width, max_change);
-			total = add + del;
 		}
-		show_name(options->file, prefix, name, len, reset, set);
+		show_name(options->file, prefix, name, len);
 		fprintf(options->file, "%5d%s", added + deleted,
 				added + deleted ? " " : "");
 		show_graph(options->file, '+', add, add_c, reset);
@@ -905,8 +995,8 @@ static void show_stats(struct diffstat_t* data, struct diff_options *options)
 		fprintf(options->file, "\n");
 	}
 	fprintf(options->file,
-	       "%s %d files changed, %d insertions(+), %d deletions(-)%s\n",
-	       set, total_files, adds, dels, reset);
+	       " %d files changed, %d insertions(+), %d deletions(-)\n",
+	       total_files, adds, dels);
 }
 
 static void show_shortstats(struct diffstat_t* data, struct diff_options *options)
@@ -934,7 +1024,7 @@ static void show_shortstats(struct diffstat_t* data, struct diff_options *option
 	       total_files, adds, dels);
 }
 
-static void show_numstat(struct diffstat_t* data, struct diff_options *options)
+static void show_numstat(struct diffstat_t *data, struct diff_options *options)
 {
 	int i;
 
@@ -1323,6 +1413,12 @@ static const struct userdiff_funcname *diff_funcname_pattern(struct diff_filespe
 	return one->driver->funcname.pattern ? &one->driver->funcname : NULL;
 }
 
+static const char *userdiff_word_regex(struct diff_filespec *one)
+{
+	diff_filespec_load_driver(one);
+	return one->driver->word_regex;
+}
+
 void diff_set_mnemonic_prefix(struct diff_options *options, const char *a, const char *b)
 {
 	if (!options->a_prefix)
@@ -1469,6 +1565,7 @@ static void builtin_diff(const char *name_a,
 		ecbdata.file = o->file;
 		xpp.flags = XDF_NEED_MINIMAL | o->xdl_opts;
 		xecfg.ctxlen = o->context;
+		xecfg.interhunkctxlen = o->interhunkcontext;
 		xecfg.flags = XDL_EMIT_FUNCNAMES;
 		if (pe)
 			xdiff_set_find_func(&xecfg, pe->pattern, pe->cflags);
@@ -1482,6 +1579,21 @@ static void builtin_diff(const char *name_a,
 			ecbdata.diff_words =
 				xcalloc(1, sizeof(struct diff_words_data));
 			ecbdata.diff_words->file = o->file;
+			if (!o->word_regex)
+				o->word_regex = userdiff_word_regex(one);
+			if (!o->word_regex)
+				o->word_regex = userdiff_word_regex(two);
+			if (!o->word_regex)
+				o->word_regex = diff_word_regex_cfg;
+			if (o->word_regex) {
+				ecbdata.diff_words->word_regex = (regex_t *)
+					xmalloc(sizeof(regex_t));
+				if (regcomp(ecbdata.diff_words->word_regex,
+						o->word_regex,
+						REG_EXTENDED | REG_NEWLINE))
+					die ("Invalid regular expression: %s",
+							o->word_regex);
+			}
 		}
 		xdi_diff_outf(&mf1, &mf2, fn_out_consume, &ecbdata,
 			      &xpp, &xecfg, &ecb);
@@ -1491,6 +1603,7 @@ static void builtin_diff(const char *name_a,
 			free(mf1.ptr);
 		if (textconv_two)
 			free(mf2.ptr);
+		xdiff_clear_find_func(&xecfg);
 	}
 
  free_ab_and_return:
@@ -1647,7 +1760,8 @@ static int reuse_worktree_file(const char *name, const unsigned char *sha1, int 
 	struct stat st;
 	int pos, len;
 
-	/* We do not read the cache ourselves here, because the
+	/*
+	 * We do not read the cache ourselves here, because the
 	 * benchmark with my previous version that always reads cache
 	 * shows that it makes things worse for diff-tree comparing
 	 * two linux-2.6 kernel trees in an already checked out work
@@ -1671,7 +1785,7 @@ static int reuse_worktree_file(const char *name, const unsigned char *sha1, int 
 	 * objects however would tend to be slower as they need
 	 * to be individually opened and inflated.
 	 */
-	if (!FAST_WORKING_DIRECTORY && !want_file && has_sha1_pack(sha1, NULL))
+	if (!FAST_WORKING_DIRECTORY && !want_file && has_sha1_pack(sha1))
 		return 0;
 
 	len = strlen(name);
@@ -1685,6 +1799,13 @@ static int reuse_worktree_file(const char *name, const unsigned char *sha1, int 
 	 * unreusable because it is not a regular file.
 	 */
 	if (hashcmp(sha1, ce->sha1) || !S_ISREG(ce->ce_mode))
+		return 0;
+
+	/*
+	 * If ce is marked as "assume unchanged", there is no
+	 * guarantee that work tree matches what we are looking for.
+	 */
+	if (ce->ce_flags & CE_VALID)
 		return 0;
 
 	/*
@@ -1836,30 +1957,48 @@ void diff_free_filespec_data(struct diff_filespec *s)
 	s->cnt_data = NULL;
 }
 
-static void prep_temp_blob(struct diff_tempfile *temp,
+static void prep_temp_blob(const char *path, struct diff_tempfile *temp,
 			   void *blob,
 			   unsigned long size,
 			   const unsigned char *sha1,
 			   int mode)
 {
 	int fd;
+	struct strbuf buf = STRBUF_INIT;
+	struct strbuf template = STRBUF_INIT;
+	char *path_dup = xstrdup(path);
+	const char *base = basename(path_dup);
 
-	fd = git_mkstemp(temp->tmp_path, PATH_MAX, ".diff_XXXXXX");
+	/* Generate "XXXXXX_basename.ext" */
+	strbuf_addstr(&template, "XXXXXX_");
+	strbuf_addstr(&template, base);
+
+	fd = git_mkstemps(temp->tmp_path, PATH_MAX, template.buf,
+			strlen(base) + 1);
 	if (fd < 0)
-		die("unable to create temp-file: %s", strerror(errno));
+		die_errno("unable to create temp-file");
+	if (convert_to_working_tree(path,
+			(const char *)blob, (size_t)size, &buf)) {
+		blob = buf.buf;
+		size = buf.len;
+	}
 	if (write_in_full(fd, blob, size) != size)
-		die("unable to write temp-file");
+		die_errno("unable to write temp-file");
 	close(fd);
 	temp->name = temp->tmp_path;
 	strcpy(temp->hex, sha1_to_hex(sha1));
 	temp->hex[40] = 0;
 	sprintf(temp->mode, "%06o", mode);
+	strbuf_release(&buf);
+	strbuf_release(&template);
+	free(path_dup);
 }
 
-static void prepare_temp_file(const char *name,
-			      struct diff_tempfile *temp,
-			      struct diff_filespec *one)
+static struct diff_tempfile *prepare_temp_file(const char *name,
+		struct diff_filespec *one)
 {
+	struct diff_tempfile *temp = claim_diff_tempfile();
+
 	if (!DIFF_FILE_VALID(one)) {
 	not_a_valid_file:
 		/* A '-' entry produces this for file-2, and
@@ -1868,7 +2007,13 @@ static void prepare_temp_file(const char *name,
 		temp->name = "/dev/null";
 		strcpy(temp->hex, ".");
 		strcpy(temp->mode, ".");
-		return;
+		return temp;
+	}
+
+	if (!remove_tempfile_installed) {
+		atexit(remove_tempfile);
+		sigchain_push_common(remove_tempfile_on_signal);
+		remove_tempfile_installed = 1;
 	}
 
 	if (!one->sha1_valid ||
@@ -1877,21 +2022,18 @@ static void prepare_temp_file(const char *name,
 		if (lstat(name, &st) < 0) {
 			if (errno == ENOENT)
 				goto not_a_valid_file;
-			die("stat(%s): %s", name, strerror(errno));
+			die_errno("stat(%s)", name);
 		}
 		if (S_ISLNK(st.st_mode)) {
-			int ret;
-			char buf[PATH_MAX + 1]; /* ought to be SYMLINK_MAX */
-			ret = readlink(name, buf, sizeof(buf));
-			if (ret < 0)
-				die("readlink(%s)", name);
-			if (ret == sizeof(buf))
-				die("symlink too long: %s", name);
-			prep_temp_blob(temp, buf, ret,
+			struct strbuf sb = STRBUF_INIT;
+			if (strbuf_readlink(&sb, name, st.st_size) < 0)
+				die_errno("readlink(%s)", name);
+			prep_temp_blob(name, temp, sb.buf, sb.len,
 				       (one->sha1_valid ?
 					one->sha1 : null_sha1),
 				       (one->sha1_valid ?
 					one->mode : S_IFLNK));
+			strbuf_release(&sb);
 		}
 		else {
 			/* we can borrow from the file in the work tree */
@@ -1908,32 +2050,15 @@ static void prepare_temp_file(const char *name,
 			 */
 			sprintf(temp->mode, "%06o", one->mode);
 		}
-		return;
+		return temp;
 	}
 	else {
 		if (diff_populate_filespec(one, 0))
 			die("cannot read data blob for %s", one->path);
-		prep_temp_blob(temp, one->data, one->size,
+		prep_temp_blob(name, temp, one->data, one->size,
 			       one->sha1, one->mode);
 	}
-}
-
-static void remove_tempfile(void)
-{
-	int i;
-
-	for (i = 0; i < 2; i++)
-		if (diff_temp[i].name == diff_temp[i].tmp_path) {
-			unlink(diff_temp[i].name);
-			diff_temp[i].name = NULL;
-		}
-}
-
-static void remove_tempfile_on_signal(int signo)
-{
-	remove_tempfile();
-	signal(SIGINT, SIG_DFL);
-	raise(signo);
+	return temp;
 }
 
 /* An external diff command takes:
@@ -1951,34 +2076,22 @@ static void run_external_diff(const char *pgm,
 			      int complete_rewrite)
 {
 	const char *spawn_arg[10];
-	struct diff_tempfile *temp = diff_temp;
 	int retval;
-	static int atexit_asked = 0;
-	const char *othername;
 	const char **arg = &spawn_arg[0];
 
-	othername = (other? other : name);
 	if (one && two) {
-		prepare_temp_file(name, &temp[0], one);
-		prepare_temp_file(othername, &temp[1], two);
-		if (! atexit_asked &&
-		    (temp[0].name == temp[0].tmp_path ||
-		     temp[1].name == temp[1].tmp_path)) {
-			atexit_asked = 1;
-			atexit(remove_tempfile);
-		}
-		signal(SIGINT, remove_tempfile_on_signal);
-	}
-
-	if (one && two) {
+		struct diff_tempfile *temp_one, *temp_two;
+		const char *othername = (other ? other : name);
+		temp_one = prepare_temp_file(name, one);
+		temp_two = prepare_temp_file(othername, two);
 		*arg++ = pgm;
 		*arg++ = name;
-		*arg++ = temp[0].name;
-		*arg++ = temp[0].hex;
-		*arg++ = temp[0].mode;
-		*arg++ = temp[1].name;
-		*arg++ = temp[1].hex;
-		*arg++ = temp[1].mode;
+		*arg++ = temp_one->name;
+		*arg++ = temp_one->hex;
+		*arg++ = temp_one->mode;
+		*arg++ = temp_two->name;
+		*arg++ = temp_two->hex;
+		*arg++ = temp_two->mode;
 		if (other) {
 			*arg++ = other;
 			*arg++ = xfrm_msg;
@@ -1997,16 +2110,86 @@ static void run_external_diff(const char *pgm,
 	}
 }
 
+static int similarity_index(struct diff_filepair *p)
+{
+	return p->score * 100 / MAX_SCORE;
+}
+
+static void fill_metainfo(struct strbuf *msg,
+			  const char *name,
+			  const char *other,
+			  struct diff_filespec *one,
+			  struct diff_filespec *two,
+			  struct diff_options *o,
+			  struct diff_filepair *p)
+{
+	strbuf_init(msg, PATH_MAX * 2 + 300);
+	switch (p->status) {
+	case DIFF_STATUS_COPIED:
+		strbuf_addf(msg, "similarity index %d%%", similarity_index(p));
+		strbuf_addstr(msg, "\ncopy from ");
+		quote_c_style(name, msg, NULL, 0);
+		strbuf_addstr(msg, "\ncopy to ");
+		quote_c_style(other, msg, NULL, 0);
+		strbuf_addch(msg, '\n');
+		break;
+	case DIFF_STATUS_RENAMED:
+		strbuf_addf(msg, "similarity index %d%%", similarity_index(p));
+		strbuf_addstr(msg, "\nrename from ");
+		quote_c_style(name, msg, NULL, 0);
+		strbuf_addstr(msg, "\nrename to ");
+		quote_c_style(other, msg, NULL, 0);
+		strbuf_addch(msg, '\n');
+		break;
+	case DIFF_STATUS_MODIFIED:
+		if (p->score) {
+			strbuf_addf(msg, "dissimilarity index %d%%\n",
+				    similarity_index(p));
+			break;
+		}
+		/* fallthru */
+	default:
+		/* nothing */
+		;
+	}
+	if (one && two && hashcmp(one->sha1, two->sha1)) {
+		int abbrev = DIFF_OPT_TST(o, FULL_INDEX) ? 40 : DEFAULT_ABBREV;
+
+		if (DIFF_OPT_TST(o, BINARY)) {
+			mmfile_t mf;
+			if ((!fill_mmfile(&mf, one) && diff_filespec_is_binary(one)) ||
+			    (!fill_mmfile(&mf, two) && diff_filespec_is_binary(two)))
+				abbrev = 40;
+		}
+		strbuf_addf(msg, "index %.*s..%.*s",
+			    abbrev, sha1_to_hex(one->sha1),
+			    abbrev, sha1_to_hex(two->sha1));
+		if (one->mode == two->mode)
+			strbuf_addf(msg, " %06o", one->mode);
+		strbuf_addch(msg, '\n');
+	}
+	if (msg->len)
+		strbuf_setlen(msg, msg->len - 1);
+}
+
 static void run_diff_cmd(const char *pgm,
 			 const char *name,
 			 const char *other,
 			 const char *attr_path,
 			 struct diff_filespec *one,
 			 struct diff_filespec *two,
-			 const char *xfrm_msg,
+			 struct strbuf *msg,
 			 struct diff_options *o,
-			 int complete_rewrite)
+			 struct diff_filepair *p)
 {
+	const char *xfrm_msg = NULL;
+	int complete_rewrite = (p->status == DIFF_STATUS_MODIFIED) && p->score;
+
+	if (msg) {
+		fill_metainfo(msg, name, other, one, two, o, p);
+		xfrm_msg = msg->len ? msg->buf : NULL;
+	}
+
 	if (!DIFF_OPT_TST(o, ALLOW_EXTERNAL))
 		pgm = NULL;
 	else {
@@ -2037,18 +2220,13 @@ static void diff_fill_sha1_info(struct diff_filespec *one)
 				return;
 			}
 			if (lstat(one->path, &st) < 0)
-				die("stat %s", one->path);
+				die_errno("stat '%s'", one->path);
 			if (index_path(one->sha1, one->path, &st, 0))
-				die("cannot hash %s\n", one->path);
+				die("cannot hash %s", one->path);
 		}
 	}
 	else
 		hashclr(one->sha1);
-}
-
-static int similarity_index(struct diff_filepair *p)
-{
-	return p->score * 100 / MAX_SCORE;
 }
 
 static void strip_prefix(int prefix_length, const char **namep, const char **otherp)
@@ -2064,13 +2242,11 @@ static void run_diff(struct diff_filepair *p, struct diff_options *o)
 {
 	const char *pgm = external_diff();
 	struct strbuf msg;
-	char *xfrm_msg;
 	struct diff_filespec *one = p->one;
 	struct diff_filespec *two = p->two;
 	const char *name;
 	const char *other;
 	const char *attr_path;
-	int complete_rewrite = 0;
 
 	name  = p->one->path;
 	other = (strcmp(name, p->two->path) ? p->two->path : NULL);
@@ -2080,83 +2256,34 @@ static void run_diff(struct diff_filepair *p, struct diff_options *o)
 
 	if (DIFF_PAIR_UNMERGED(p)) {
 		run_diff_cmd(pgm, name, NULL, attr_path,
-			     NULL, NULL, NULL, o, 0);
+			     NULL, NULL, NULL, o, p);
 		return;
 	}
 
 	diff_fill_sha1_info(one);
 	diff_fill_sha1_info(two);
 
-	strbuf_init(&msg, PATH_MAX * 2 + 300);
-	switch (p->status) {
-	case DIFF_STATUS_COPIED:
-		strbuf_addf(&msg, "similarity index %d%%", similarity_index(p));
-		strbuf_addstr(&msg, "\ncopy from ");
-		quote_c_style(name, &msg, NULL, 0);
-		strbuf_addstr(&msg, "\ncopy to ");
-		quote_c_style(other, &msg, NULL, 0);
-		strbuf_addch(&msg, '\n');
-		break;
-	case DIFF_STATUS_RENAMED:
-		strbuf_addf(&msg, "similarity index %d%%", similarity_index(p));
-		strbuf_addstr(&msg, "\nrename from ");
-		quote_c_style(name, &msg, NULL, 0);
-		strbuf_addstr(&msg, "\nrename to ");
-		quote_c_style(other, &msg, NULL, 0);
-		strbuf_addch(&msg, '\n');
-		break;
-	case DIFF_STATUS_MODIFIED:
-		if (p->score) {
-			strbuf_addf(&msg, "dissimilarity index %d%%\n",
-					similarity_index(p));
-			complete_rewrite = 1;
-			break;
-		}
-		/* fallthru */
-	default:
-		/* nothing */
-		;
-	}
-
-	if (hashcmp(one->sha1, two->sha1)) {
-		int abbrev = DIFF_OPT_TST(o, FULL_INDEX) ? 40 : DEFAULT_ABBREV;
-
-		if (DIFF_OPT_TST(o, BINARY)) {
-			mmfile_t mf;
-			if ((!fill_mmfile(&mf, one) && diff_filespec_is_binary(one)) ||
-			    (!fill_mmfile(&mf, two) && diff_filespec_is_binary(two)))
-				abbrev = 40;
-		}
-		strbuf_addf(&msg, "index %.*s..%.*s",
-				abbrev, sha1_to_hex(one->sha1),
-				abbrev, sha1_to_hex(two->sha1));
-		if (one->mode == two->mode)
-			strbuf_addf(&msg, " %06o", one->mode);
-		strbuf_addch(&msg, '\n');
-	}
-
-	if (msg.len)
-		strbuf_setlen(&msg, msg.len - 1);
-	xfrm_msg = msg.len ? msg.buf : NULL;
-
 	if (!pgm &&
 	    DIFF_FILE_VALID(one) && DIFF_FILE_VALID(two) &&
 	    (S_IFMT & one->mode) != (S_IFMT & two->mode)) {
-		/* a filepair that changes between file and symlink
+		/*
+		 * a filepair that changes between file and symlink
 		 * needs to be split into deletion and creation.
 		 */
 		struct diff_filespec *null = alloc_filespec(two->path);
 		run_diff_cmd(NULL, name, other, attr_path,
-			     one, null, xfrm_msg, o, 0);
+			     one, null, &msg, o, p);
 		free(null);
+		strbuf_release(&msg);
+
 		null = alloc_filespec(one->path);
 		run_diff_cmd(NULL, name, other, attr_path,
-			     null, two, xfrm_msg, o, 0);
+			     null, two, &msg, o, p);
 		free(null);
 	}
 	else
 		run_diff_cmd(pgm, name, other, attr_path,
-			     one, two, xfrm_msg, o, complete_rewrite);
+			     one, two, &msg, o, p);
 
 	strbuf_release(&msg);
 }
@@ -2222,15 +2349,12 @@ void diff_setup(struct diff_options *options)
 	options->break_opt = -1;
 	options->rename_limit = -1;
 	options->dirstat_percent = 3;
-	DIFF_OPT_CLR(options, DIRSTAT_CUMULATIVE);
 	options->context = 3;
 
 	options->change = diff_change;
 	options->add_remove = diff_addremove;
 	if (diff_use_color_default > 0)
 		DIFF_OPT_SET(options, COLOR_DIFF);
-	else
-		DIFF_OPT_CLR(options, COLOR_DIFF);
 	options->detect_rename = diff_detect_rename_default;
 
 	if (!diff_mnemonic_prefix) {
@@ -2466,11 +2590,13 @@ int diff_opt_parse(struct diff_options *options, const char **av, int ac)
 
 	/* xdiff options */
 	else if (!strcmp(arg, "-w") || !strcmp(arg, "--ignore-all-space"))
-		options->xdl_opts |= XDF_IGNORE_WHITESPACE;
+		DIFF_XDL_SET(options, IGNORE_WHITESPACE);
 	else if (!strcmp(arg, "-b") || !strcmp(arg, "--ignore-space-change"))
-		options->xdl_opts |= XDF_IGNORE_WHITESPACE_CHANGE;
+		DIFF_XDL_SET(options, IGNORE_WHITESPACE_CHANGE);
 	else if (!strcmp(arg, "--ignore-space-at-eol"))
-		options->xdl_opts |= XDF_IGNORE_WHITESPACE_AT_EOL;
+		DIFF_XDL_SET(options, IGNORE_WHITESPACE_AT_EOL);
+	else if (!strcmp(arg, "--patience"))
+		DIFF_XDL_SET(options, PATIENCE_DIFF);
 
 	/* flags options */
 	else if (!strcmp(arg, "--binary")) {
@@ -2491,8 +2617,15 @@ int diff_opt_parse(struct diff_options *options, const char **av, int ac)
 		DIFF_OPT_SET(options, COLOR_DIFF);
 	else if (!strcmp(arg, "--no-color"))
 		DIFF_OPT_CLR(options, COLOR_DIFF);
-	else if (!strcmp(arg, "--color-words"))
-		options->flags |= DIFF_OPT_COLOR_DIFF | DIFF_OPT_COLOR_DIFF_WORDS;
+	else if (!strcmp(arg, "--color-words")) {
+		DIFF_OPT_SET(options, COLOR_DIFF);
+		DIFF_OPT_SET(options, COLOR_DIFF_WORDS);
+	}
+	else if (!prefixcmp(arg, "--color-words=")) {
+		DIFF_OPT_SET(options, COLOR_DIFF);
+		DIFF_OPT_SET(options, COLOR_DIFF_WORDS);
+		options->word_regex = arg + 14;
+	}
 	else if (!strcmp(arg, "--exit-code"))
 		DIFF_OPT_SET(options, EXIT_WITH_STATUS);
 	else if (!strcmp(arg, "--quiet"))
@@ -2538,6 +2671,9 @@ int diff_opt_parse(struct diff_options *options, const char **av, int ac)
 		options->b_prefix = arg + 13;
 	else if (!strcmp(arg, "--no-prefix"))
 		options->a_prefix = options->b_prefix = "";
+	else if (opt_arg(arg, '\0', "inter-hunk-context",
+			 &options->interhunkcontext))
+		;
 	else if (!prefixcmp(arg, "--output=")) {
 		options->file = fopen(arg + strlen("--output="), "w");
 		options->close_file = 1;
@@ -3444,15 +3580,15 @@ void diff_unmerge(struct diff_options *options,
 static char *run_textconv(const char *pgm, struct diff_filespec *spec,
 		size_t *outsize)
 {
-	struct diff_tempfile temp;
+	struct diff_tempfile *temp;
 	const char *argv[3];
 	const char **arg = argv;
 	struct child_process child;
 	struct strbuf buf = STRBUF_INIT;
 
-	prepare_temp_file(spec->path, &temp, spec);
+	temp = prepare_temp_file(spec->path, spec);
 	*arg++ = pgm;
-	*arg++ = temp.name;
+	*arg++ = temp->name;
 	*arg = NULL;
 
 	memset(&child, 0, sizeof(child));
@@ -3461,13 +3597,12 @@ static char *run_textconv(const char *pgm, struct diff_filespec *spec,
 	if (start_command(&child) != 0 ||
 	    strbuf_read(&buf, child.out, 0) < 0 ||
 	    finish_command(&child) != 0) {
-		if (temp.name == temp.tmp_path)
-			unlink(temp.name);
+		strbuf_release(&buf);
+		remove_tempfile();
 		error("error running textconv command '%s'", pgm);
 		return NULL;
 	}
-	if (temp.name == temp.tmp_path)
-		unlink(temp.name);
+	remove_tempfile();
 
 	return strbuf_detach(&buf, outsize);
 }

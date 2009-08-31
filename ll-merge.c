@@ -55,7 +55,7 @@ static int ll_binary_merge(const struct ll_merge_driver *drv_unused,
 
 static int ll_xdl_merge(const struct ll_merge_driver *drv_unused,
 			mmbuffer_t *result,
-			const char *path_unused,
+			const char *path,
 			mmfile_t *orig,
 			mmfile_t *src1, const char *name1,
 			mmfile_t *src2, const char *name2,
@@ -67,10 +67,10 @@ static int ll_xdl_merge(const struct ll_merge_driver *drv_unused,
 	if (buffer_is_binary(orig->ptr, orig->size) ||
 	    buffer_is_binary(src1->ptr, src1->size) ||
 	    buffer_is_binary(src2->ptr, src2->size)) {
-		warning("Cannot merge binary files: %s vs. %s\n",
-			name1, name2);
+		warning("Cannot merge binary files: %s (%s vs. %s)\n",
+			path, name1, name2);
 		return ll_binary_merge(drv_unused, result,
-				       path_unused,
+				       path,
 				       orig, src1, name1,
 				       src2, name2,
 				       virtual_ancestor);
@@ -152,7 +152,7 @@ static void create_temp(mmfile_t *src, char *path)
 	strcpy(path, ".merge_file_XXXXXX");
 	fd = xmkstemp(path);
 	if (write_in_full(fd, src->ptr, src->size) != src->size)
-		die("unable to write temp-file");
+		die_errno("unable to write temp-file");
 	close(fd);
 }
 
@@ -175,8 +175,7 @@ static int ll_ext_merge(const struct ll_merge_driver *fn,
 		{ "B", temp[2] },
 		{ NULL }
 	};
-	struct child_process child;
-	const char *args[20];
+	const char *args[] = { "sh", "-c", NULL, NULL };
 	int status, fd, i;
 	struct stat st;
 
@@ -191,14 +190,8 @@ static int ll_ext_merge(const struct ll_merge_driver *fn,
 
 	strbuf_expand(&cmd, fn->cmdline, strbuf_expand_dict_cb, &dict);
 
-	memset(&child, 0, sizeof(child));
-	child.argv = args;
-	args[0] = "sh";
-	args[1] = "-c";
 	args[2] = cmd.buf;
-	args[3] = NULL;
-
-	status = run_command(&child);
+	status = run_command_v_opt(args, 0);
 	if (status < -ERR_RUN_COMMAND_FORK)
 		; /* failure in run-command */
 	else
@@ -219,7 +212,7 @@ static int ll_ext_merge(const struct ll_merge_driver *fn,
 	close(fd);
  bad:
 	for (i = 0; i < 3; i++)
-		unlink(temp[i]);
+		unlink_or_warn(temp[i]);
 	strbuf_release(&cmd);
 	return status;
 }
@@ -238,7 +231,7 @@ static int read_merge_config(const char *var, const char *value, void *cb)
 
 	if (!strcmp(var, "merge.default")) {
 		if (value)
-			default_ll_merge = strdup(value);
+			default_ll_merge = xstrdup(value);
 		return 0;
 	}
 
@@ -272,7 +265,7 @@ static int read_merge_config(const char *var, const char *value, void *cb)
 	if (!strcmp("name", ep)) {
 		if (!value)
 			return error("%s: lacks value", var);
-		fn->description = strdup(value);
+		fn->description = xstrdup(value);
 		return 0;
 	}
 
@@ -295,14 +288,14 @@ static int read_merge_config(const char *var, const char *value, void *cb)
 		 * file named by %A, and signal that it has done with zero exit
 		 * status.
 		 */
-		fn->cmdline = strdup(value);
+		fn->cmdline = xstrdup(value);
 		return 0;
 	}
 
 	if (!strcmp("recursive", ep)) {
 		if (!value)
 			return error("%s: lacks value", var);
-		fn->recursive = strdup(value);
+		fn->recursive = xstrdup(value);
 		return 0;
 	}
 

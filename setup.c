@@ -4,92 +4,6 @@
 static int inside_git_dir = -1;
 static int inside_work_tree = -1;
 
-static int sanitary_path_copy(char *dst, const char *src)
-{
-	char *dst0;
-
-	if (has_dos_drive_prefix(src)) {
-		*dst++ = *src++;
-		*dst++ = *src++;
-	}
-	dst0 = dst;
-
-	if (is_dir_sep(*src)) {
-		*dst++ = '/';
-		while (is_dir_sep(*src))
-			src++;
-	}
-
-	for (;;) {
-		char c = *src;
-
-		/*
-		 * A path component that begins with . could be
-		 * special:
-		 * (1) "." and ends   -- ignore and terminate.
-		 * (2) "./"           -- ignore them, eat slash and continue.
-		 * (3) ".." and ends  -- strip one and terminate.
-		 * (4) "../"          -- strip one, eat slash and continue.
-		 */
-		if (c == '.') {
-			if (!src[1]) {
-				/* (1) */
-				src++;
-			} else if (is_dir_sep(src[1])) {
-				/* (2) */
-				src += 2;
-				while (is_dir_sep(*src))
-					src++;
-				continue;
-			} else if (src[1] == '.') {
-				if (!src[2]) {
-					/* (3) */
-					src += 2;
-					goto up_one;
-				} else if (is_dir_sep(src[2])) {
-					/* (4) */
-					src += 3;
-					while (is_dir_sep(*src))
-						src++;
-					goto up_one;
-				}
-			}
-		}
-
-		/* copy up to the next '/', and eat all '/' */
-		while ((c = *src++) != '\0' && !is_dir_sep(c))
-			*dst++ = c;
-		if (is_dir_sep(c)) {
-			*dst++ = '/';
-			while (is_dir_sep(c))
-				c = *src++;
-			src--;
-		} else if (!c)
-			break;
-		continue;
-
-	up_one:
-		/*
-		 * dst0..dst is prefix portion, and dst[-1] is '/';
-		 * go up one level.
-		 */
-		dst -= 2; /* go past trailing '/' if any */
-		if (dst < dst0)
-			return -1;
-		while (1) {
-			if (dst <= dst0)
-				break;
-			c = *dst--;
-			if (c == '/') {	/* MinGW: cannot be '\\' anymore */
-				dst += 2;
-				break;
-			}
-		}
-	}
-	*dst = '\0';
-	return 0;
-}
-
 const char *prefix_path(const char *prefix, int len, const char *path)
 {
 	const char *orig = path;
@@ -101,7 +15,7 @@ const char *prefix_path(const char *prefix, int len, const char *path)
 			memcpy(sanitized, prefix, len);
 		strcpy(sanitized + len, path);
 	}
-	if (sanitary_path_copy(sanitized, sanitized))
+	if (normalize_path_copy(sanitized, sanitized))
 		goto error_out;
 	if (is_absolute_path(orig)) {
 		const char *work_tree = get_git_work_tree();
@@ -167,7 +81,7 @@ void verify_filename(const char *prefix, const char *arg)
 	if (errno == ENOENT)
 		die("ambiguous argument '%s': unknown revision or path not in the working tree.\n"
 		    "Use '--' to separate paths from revisions", arg);
-	die("'%s': %s", arg, strerror(errno));
+	die_errno("failed to stat '%s'", arg);
 }
 
 /*
@@ -189,7 +103,7 @@ void verify_non_filename(const char *prefix, const char *arg)
 		die("ambiguous argument '%s': both revision and filename\n"
 		    "Use '--' to separate filenames from revisions", arg);
 	if (errno != ENOENT && errno != ENOTDIR)
-		die("'%s': %s", arg, strerror(errno));
+		die_errno("failed to stat '%s'", arg);
 }
 
 const char **get_pathspec(const char *prefix, const char **pathspec)
@@ -343,7 +257,7 @@ const char *read_gitfile_gently(const char *path)
 		return NULL;
 	fd = open(path, O_RDONLY);
 	if (fd < 0)
-		die("Error opening %s: %s", path, strerror(errno));
+		die_errno("Error opening '%s'", path);
 	buf = xmalloc(st.st_size + 1);
 	len = read_in_full(fd, buf, st.st_size);
 	close(fd);
@@ -413,7 +327,7 @@ const char *setup_git_directory_gently(int *nongit_ok)
 				return NULL;
 			set_git_dir(make_absolute_path(gitdirenv));
 			if (chdir(work_tree_env) < 0)
-				die ("Could not chdir to %s", work_tree_env);
+				die_errno ("Could not chdir to '%s'", work_tree_env);
 			strcat(buffer, "/");
 			return retval;
 		}
@@ -425,7 +339,7 @@ const char *setup_git_directory_gently(int *nongit_ok)
 	}
 
 	if (!getcwd(cwd, sizeof(cwd)-1))
-		die("Unable to read current working directory");
+		die_errno("Unable to read current working directory");
 
 	ceil_offset = longest_ancestor_length(cwd, env_ceiling_dirs);
 	if (ceil_offset < 0 && has_dos_drive_prefix(cwd))
@@ -456,7 +370,11 @@ const char *setup_git_directory_gently(int *nongit_ok)
 			inside_git_dir = 1;
 			if (!work_tree_env)
 				inside_work_tree = 0;
-			setenv(GIT_DIR_ENVIRONMENT, ".", 1);
+			if (offset != len) {
+				cwd[offset] = '\0';
+				setenv(GIT_DIR_ENVIRONMENT, cwd, 1);
+			} else
+				setenv(GIT_DIR_ENVIRONMENT, ".", 1);
 			check_repository_format_gently(nongit_ok);
 			return NULL;
 		}
@@ -464,14 +382,14 @@ const char *setup_git_directory_gently(int *nongit_ok)
 		if (offset <= ceil_offset) {
 			if (nongit_ok) {
 				if (chdir(cwd))
-					die("Cannot come back to cwd");
+					die_errno("Cannot come back to cwd");
 				*nongit_ok = 1;
 				return NULL;
 			}
 			die("Not a git repository (or any of the parent directories): %s", DEFAULT_GIT_DIR_ENVIRONMENT);
 		}
 		if (chdir(".."))
-			die("Cannot change to %s/..: %s", cwd, strerror(errno));
+			die_errno("Cannot change to '%s/..'", cwd);
 	}
 
 	inside_git_dir = 0;
@@ -516,7 +434,7 @@ int git_config_perm(const char *var, const char *value)
 
 	/*
 	 * Treat values 0, 1 and 2 as compatibility cases, otherwise it is
-	 * a chmod value.
+	 * a chmod value to restrict to.
 	 */
 	switch (i) {
 	case PERM_UMASK:               /* 0 */
@@ -538,7 +456,7 @@ int git_config_perm(const char *var, const char *value)
 	 * Mask filemode value. Others can not get write permission.
 	 * x flags for directories are handled separately.
 	 */
-	return i & 0666;
+	return -(i & 0666);
 }
 
 int check_repository_format_version(const char *var, const char *value, void *cb)
@@ -575,10 +493,10 @@ const char *setup_git_directory(void)
 		static char buffer[PATH_MAX + 1];
 		char *rel;
 		if (retval && chdir(retval))
-			die ("Could not jump back into original cwd");
+			die_errno ("Could not jump back into original cwd");
 		rel = get_relative_cwd(buffer, PATH_MAX, get_git_work_tree());
 		if (rel && *rel && chdir(get_git_work_tree()))
-			die ("Could not jump to working directory");
+			die_errno ("Could not jump to working directory");
 		return rel && *rel ? strcat(rel, "/") : NULL;
 	}
 

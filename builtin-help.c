@@ -80,10 +80,9 @@ static int check_emacsclient_version(void)
 	ec_process.argv = argv_ec;
 	ec_process.err = -1;
 	ec_process.stdout_to_stderr = 1;
-	if (start_command(&ec_process)) {
-		fprintf(stderr, "Failed to start emacsclient.\n");
-		return -1;
-	}
+	if (start_command(&ec_process))
+		return error("Failed to start emacsclient.");
+
 	strbuf_read(&buffer, ec_process.err, 20);
 	close(ec_process.err);
 
@@ -94,27 +93,24 @@ static int check_emacsclient_version(void)
 	finish_command(&ec_process);
 
 	if (prefixcmp(buffer.buf, "emacsclient")) {
-		fprintf(stderr, "Failed to parse emacsclient version.\n");
 		strbuf_release(&buffer);
-		return -1;
+		return error("Failed to parse emacsclient version.");
 	}
 
 	strbuf_remove(&buffer, 0, strlen("emacsclient"));
 	version = atoi(buffer.buf);
 
 	if (version < 22) {
-		fprintf(stderr,
-			"emacsclient version '%d' too old (< 22).\n",
-			version);
 		strbuf_release(&buffer);
-		return -1;
+		return error("emacsclient version '%d' too old (< 22).",
+			version);
 	}
 
 	strbuf_release(&buffer);
 	return 0;
 }
 
-static void exec_woman_emacs(const char* path, const char *page)
+static void exec_woman_emacs(const char *path, const char *page)
 {
 	if (!check_emacsclient_version()) {
 		/* This works only with emacsclient version >= 22. */
@@ -128,7 +124,7 @@ static void exec_woman_emacs(const char* path, const char *page)
 	}
 }
 
-static void exec_man_konqueror(const char* path, const char *page)
+static void exec_man_konqueror(const char *path, const char *page)
 {
 	const char *display = getenv("DISPLAY");
 	if (display && *display) {
@@ -156,7 +152,7 @@ static void exec_man_konqueror(const char* path, const char *page)
 	}
 }
 
-static void exec_man_man(const char* path, const char *page)
+static void exec_man_man(const char *path, const char *page)
 {
 	if (!path)
 		path = "man";
@@ -236,7 +232,7 @@ static int add_man_viewer_info(const char *var, const char *value)
 	const char *subkey = strrchr(name, '.');
 
 	if (!subkey)
-		return error("Config with no key for man viewer: %s", name);
+		return 0;
 
 	if (!strcmp(subkey, ".path")) {
 		if (!value)
@@ -249,7 +245,6 @@ static int add_man_viewer_info(const char *var, const char *value)
 		return add_man_viewer_cmd(name, subkey - name, value);
 	}
 
-	warning("'%s': unsupported man viewer sub key.", subkey);
 	return 0;
 }
 
@@ -329,7 +324,7 @@ static void setup_man_path(void)
 	 * old_path, the ':' at the end will let 'man' to try
 	 * system-wide paths after ours to find the manual page. If
 	 * there is old_path, we need ':' as delimiter. */
-	strbuf_addstr(&new_path, GIT_MAN_PATH);
+	strbuf_addstr(&new_path, system_path(GIT_MAN_PATH));
 	strbuf_addch(&new_path, ':');
 	if (old_path)
 		strbuf_addstr(&new_path, old_path);
@@ -375,7 +370,7 @@ static void show_man_page(const char *git_cmd)
 static void show_info_page(const char *git_cmd)
 {
 	const char *page = cmd_to_page(git_cmd);
-	setenv("INFOPATH", GIT_INFO_PATH, 1);
+	setenv("INFOPATH", system_path(GIT_INFO_PATH), 1);
 	execlp("info", "info", "gitman", page, NULL);
 }
 
@@ -399,7 +394,7 @@ static void get_html_page_path(struct strbuf *page_path, const char *page)
  * HTML.
  */
 #ifndef open_html
-void open_html(const char *path)
+static void open_html(const char *path)
 {
 	execl_git_cmd("web--browse", "-c", "help.browser", path, NULL);
 }
@@ -424,7 +419,7 @@ int cmd_help(int argc, const char **argv, const char *prefix)
 	setup_git_directory_gently(&nongit);
 	git_config(git_help_config, NULL);
 
-	argc = parse_options(argc, argv, builtin_help_options,
+	argc = parse_options(argc, argv, prefix, builtin_help_options,
 			builtin_help_usage, 0);
 
 	if (show_all) {

@@ -33,7 +33,6 @@ int cmd_clean(int argc, const char **argv, const char *prefix)
 	int ignored_only = 0, baselen = 0, config_set = 0, errors = 0;
 	struct strbuf directory = STRBUF_INIT;
 	struct dir_struct dir;
-	const char *path, *base;
 	static const char **pathspec;
 	struct strbuf buf = STRBUF_INIT;
 	const char *qname;
@@ -56,11 +55,12 @@ int cmd_clean(int argc, const char **argv, const char *prefix)
 	else
 		config_set = 1;
 
-	argc = parse_options(argc, argv, options, builtin_clean_usage, 0);
+	argc = parse_options(argc, argv, prefix, options, builtin_clean_usage,
+			     0);
 
 	memset(&dir, 0, sizeof(dir));
 	if (ignored_only)
-		dir.show_ignored = 1;
+		dir.flags |= DIR_SHOW_IGNORED;
 
 	if (ignored && ignored_only)
 		die("-x and -X cannot be used together");
@@ -69,7 +69,7 @@ int cmd_clean(int argc, const char **argv, const char *prefix)
 		die("clean.requireForce%s set and -n or -f not given; "
 		    "refusing to clean", config_set ? "" : " not");
 
-	dir.show_other_directories = 1;
+	dir.flags |= DIR_SHOW_OTHER_DIRECTORIES;
 
 	if (!ignored)
 		setup_standard_excludes(&dir);
@@ -77,16 +77,7 @@ int cmd_clean(int argc, const char **argv, const char *prefix)
 	pathspec = get_pathspec(prefix, argv);
 	read_cache();
 
-	/*
-	 * Calculate common prefix for the pathspec, and
-	 * use that to optimize the directory walk
-	 */
-	baselen = common_prefix(pathspec);
-	path = ".";
-	base = "";
-	if (baselen)
-		path = base = xmemdupz(*pathspec, baselen);
-	read_directory(&dir, path, base, baselen, pathspec);
+	fill_directory(&dir, pathspec);
 
 	if (pathspec)
 		seen = xmalloc(argc > 0 ? argc : 1);

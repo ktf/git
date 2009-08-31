@@ -10,6 +10,7 @@
 #include "transport.h"
 #include "run-command.h"
 #include "parse-options.h"
+#include "sigchain.h"
 
 static const char * const builtin_fetch_usage[] = {
 	"git fetch [options] [<repository> <refspec>...]",
@@ -58,7 +59,7 @@ static void unlock_pack(void)
 static void unlock_pack_on_signal(int signo)
 {
 	unlock_pack();
-	signal(SIGINT, SIG_DFL);
+	sigchain_pop(signo);
 	raise(signo);
 }
 
@@ -166,6 +167,9 @@ static struct ref *get_ref_map(struct transport *transport,
 	return ref_map;
 }
 
+#define STORE_REF_ERROR_OTHER 1
+#define STORE_REF_ERROR_DF_CONFLICT 2
+
 static int s_update_ref(const char *action,
 			struct ref *ref,
 			int check_old)
@@ -180,9 +184,11 @@ static int s_update_ref(const char *action,
 	lock = lock_any_ref_for_update(ref->name,
 				       check_old ? ref->old_sha1 : NULL, 0);
 	if (!lock)
-		return 2;
+		return errno == ENOTDIR ? STORE_REF_ERROR_DF_CONFLICT :
+					  STORE_REF_ERROR_OTHER;
 	if (write_ref_sha1(lock, ref->new_sha1, msg) < 0)
-		return 2;
+		return errno == ENOTDIR ? STORE_REF_ERROR_DF_CONFLICT :
+					  STORE_REF_ERROR_OTHER;
 	return 0;
 }
 
@@ -196,11 +202,7 @@ static int update_local_ref(struct ref *ref,
 	struct commit *current = NULL, *updated;
 	enum object_type type;
 	struct branch *current_branch = branch_get(NULL);
-	const char *pretty_ref = ref->name + (
-		!prefixcmp(ref->name, "refs/heads/") ? 11 :
-		!prefixcmp(ref->name, "refs/tags/") ? 10 :
-		!prefixcmp(ref->name, "refs/remotes/") ? 13 :
-		0);
+	const char *pretty_ref = prettify_refname(ref->name);
 
 	*display = 0;
 	type = sha1_object_info(ref->new_sha1, NULL);
@@ -292,7 +294,7 @@ static int update_local_ref(struct ref *ref,
 	}
 }
 
-static int store_updated_refs(const char *url, const char *remote_name,
+static int store_updated_refs(const char *raw_url, const char *remote_name,
 		struct ref *ref_map)
 {
 	FILE *fp;
@@ -301,11 +303,13 @@ static int store_updated_refs(const char *url, const char *remote_name,
 	char note[1024];
 	const char *what, *kind;
 	struct ref *rm;
-	char *filename = git_path("FETCH_HEAD");
+	char *url, *filename = git_path("FETCH_HEAD");
 
 	fp = fopen(filename, "a");
 	if (!fp)
 		return error("cannot open %s: %s\n", filename, strerror(errno));
+
+	url = transport_anonymize_url(raw_url);
 	for (rm = ref_map; rm; rm = rm->next) {
 		struct ref *ref = NULL;
 
@@ -356,12 +360,18 @@ static int store_updated_refs(const char *url, const char *remote_name,
 						    kind);
 			note_len += sprintf(note + note_len, "'%s' of ", what);
 		}
-		note_len += sprintf(note + note_len, "%.*s", url_len, url);
-		fprintf(fp, "%s\t%s\t%s\n",
+		note[note_len] = '\0';
+		fprintf(fp, "%s\t%s\t%s",
 			sha1_to_hex(commit ? commit->object.sha1 :
 				    rm->old_sha1),
 			rm->merge ? "" : "not-for-merge",
 			note);
+		for (i = 0; i < url_len; ++i)
+			if ('\n' == url[i])
+				fputs("\\n", fp);
+			else
+				fputc(url[i], fp);
+		fputc('\n', fp);
 
 		if (ref)
 			rc |= update_local_ref(ref, what, note);
@@ -379,8 +389,9 @@ static int store_updated_refs(const char *url, const char *remote_name,
 				fprintf(stderr, " %s\n", note);
 		}
 	}
+	free(url);
 	fclose(fp);
-	if (rc & 2)
+	if (rc & STORE_REF_ERROR_DF_CONFLICT)
 		error("some local refs could not be updated; try running\n"
 		      " 'git remote prune %s' to remove any old, conflicting "
 		      "branches", remote_name);
@@ -389,14 +400,14 @@ static int store_updated_refs(const char *url, const char *remote_name,
 
 /*
  * We would want to bypass the object transfer altogether if
- * everything we are going to fetch already exists and connected
+ * everything we are going to fetch already exists and is connected
  * locally.
  *
- * The refs we are going to fetch are in to_fetch (nr_heads in
- * total).  If running
+ * The refs we are going to fetch are in ref_map.  If running
  *
- *  $ git rev-list --objects to_fetch[0] to_fetch[1] ... --not --all
+ *  $ git rev-list --objects --stdin --not --all
  *
+ * (feeding all the refs in ref_map on its standard input)
  * does not error out, that means everything reachable from the
  * refs we are going to fetch exists and is connected to some of
  * our existing refs.
@@ -405,8 +416,9 @@ static int quickfetch(struct ref *ref_map)
 {
 	struct child_process revlist;
 	struct ref *ref;
-	char **argv;
-	int i, err;
+	int err;
+	const char *argv[] = {"rev-list",
+		"--quiet", "--objects", "--stdin", "--not", "--all", NULL};
 
 	/*
 	 * If we are deepening a shallow clone we already have these
@@ -418,34 +430,46 @@ static int quickfetch(struct ref *ref_map)
 	if (depth)
 		return -1;
 
-	for (i = 0, ref = ref_map; ref; ref = ref->next)
-		i++;
-	if (!i)
+	if (!ref_map)
 		return 0;
 
-	argv = xmalloc(sizeof(*argv) * (i + 6));
-	i = 0;
-	argv[i++] = xstrdup("rev-list");
-	argv[i++] = xstrdup("--quiet");
-	argv[i++] = xstrdup("--objects");
-	for (ref = ref_map; ref; ref = ref->next)
-		argv[i++] = xstrdup(sha1_to_hex(ref->old_sha1));
-	argv[i++] = xstrdup("--not");
-	argv[i++] = xstrdup("--all");
-	argv[i++] = NULL;
-
 	memset(&revlist, 0, sizeof(revlist));
-	revlist.argv = (const char**)argv;
+	revlist.argv = argv;
 	revlist.git_cmd = 1;
-	revlist.no_stdin = 1;
 	revlist.no_stdout = 1;
 	revlist.no_stderr = 1;
-	err = run_command(&revlist);
+	revlist.in = -1;
 
-	for (i = 0; argv[i]; i++)
-		free(argv[i]);
-	free(argv);
-	return err;
+	err = start_command(&revlist);
+	if (err) {
+		error("could not run rev-list");
+		return err;
+	}
+
+	/*
+	 * If rev-list --stdin encounters an unknown commit, it terminates,
+	 * which will cause SIGPIPE in the write loop below.
+	 */
+	sigchain_push(SIGPIPE, SIG_IGN);
+
+	for (ref = ref_map; ref; ref = ref->next) {
+		if (write_in_full(revlist.in, sha1_to_hex(ref->old_sha1), 40) < 0 ||
+		    write_in_full(revlist.in, "\n", 1) < 0) {
+			if (errno != EPIPE && errno != EINVAL)
+				error("failed write to rev-list: %s", strerror(errno));
+			err = -1;
+			break;
+		}
+	}
+
+	if (close(revlist.in)) {
+		error("failed to close rev-list's stdin: %s", strerror(errno));
+		err = -1;
+	}
+
+	sigchain_pop(SIGPIPE);
+
+	return finish_command(&revlist) || err;
 }
 
 static int fetch_refs(struct transport *transport, struct ref *ref_map)
@@ -543,7 +567,8 @@ static void check_not_current_branch(struct ref *ref_map)
 	for (; ref_map; ref_map = ref_map->next)
 		if (ref_map->peer_ref && !strcmp(current_branch->refname,
 					ref_map->peer_ref->name))
-			die("Refusing to fetch into current branch");
+			die("Refusing to fetch into current branch %s "
+			    "of non-bare repository", current_branch->refname);
 }
 
 static int do_fetch(struct transport *transport,
@@ -607,7 +632,7 @@ static void set_option(const char *name, const char *value)
 {
 	int r = transport_set_option(transport, name, value);
 	if (r < 0)
-		die("Option \"%s\" value \"%s\" is not valid for %s\n",
+		die("Option \"%s\" value \"%s\" is not valid for %s",
 			name, value, transport->url);
 	if (r > 0)
 		warning("Option \"%s\" is ignored for %s\n",
@@ -627,13 +652,16 @@ int cmd_fetch(int argc, const char **argv, const char *prefix)
 	for (i = 1; i < argc; i++)
 		strbuf_addf(&default_rla, " %s", argv[i]);
 
-	argc = parse_options(argc, argv,
+	argc = parse_options(argc, argv, prefix,
 			     builtin_fetch_options, builtin_fetch_usage, 0);
 
 	if (argc == 0)
 		remote = remote_get(NULL);
 	else
 		remote = remote_get(argv[0]);
+
+	if (!remote)
+		die("Where do you want to fetch from today?");
 
 	transport = transport_get(remote, remote->url[0]);
 	if (verbosity >= 2)
@@ -646,9 +674,6 @@ int cmd_fetch(int argc, const char **argv, const char *prefix)
 		set_option(TRANS_OPT_KEEP, "yes");
 	if (depth)
 		set_option(TRANS_OPT_DEPTH, depth);
-
-	if (!transport->url)
-		die("Where do you want to fetch from today?");
 
 	if (argc > 1) {
 		int j = 0;
@@ -672,7 +697,7 @@ int cmd_fetch(int argc, const char **argv, const char *prefix)
 		ref_nr = j;
 	}
 
-	signal(SIGINT, unlock_pack_on_signal);
+	sigchain_push_common(unlock_pack_on_signal);
 	atexit(unlock_pack);
 	exit_code = do_fetch(transport,
 			parse_fetch_refspec(ref_nr, refs), ref_nr);

@@ -419,6 +419,19 @@ test_expect_success 'push with config remote.*.push = HEAD' '
 git config --remove-section remote.there
 git config --remove-section branch.master
 
+test_expect_success 'push with config remote.*.pushurl' '
+
+	mk_test heads/master &&
+	git checkout master &&
+	git config remote.there.url test2repo &&
+	git config remote.there.pushurl testrepo &&
+	git push there &&
+	check_push_result $the_commit heads/master
+'
+
+# clean up the cruft left with the previous one
+git config --remove-section remote.there
+
 test_expect_success 'push with dry-run' '
 
 	mk_test heads/master &&
@@ -492,7 +505,7 @@ test_expect_success 'warn on push to HEAD of non-bare repository' '
 		git checkout master &&
 		git config receive.denyCurrentBranch warn) &&
 	git push testrepo master 2>stderr &&
-	grep "warning.*this may cause confusion" stderr
+	grep "warning: updating the current branch" stderr
 '
 
 test_expect_success 'deny push to HEAD of non-bare repository' '
@@ -510,7 +523,7 @@ test_expect_success 'allow push to HEAD of bare repository (bare)' '
 		git config receive.denyCurrentBranch true &&
 		git config core.bare true) &&
 	git push testrepo master 2>stderr &&
-	! grep "warning.*this may cause confusion" stderr
+	! grep "warning: updating the current branch" stderr
 '
 
 test_expect_success 'allow push to HEAD of non-bare repository (config)' '
@@ -520,7 +533,7 @@ test_expect_success 'allow push to HEAD of non-bare repository (config)' '
 		git config receive.denyCurrentBranch false
 	) &&
 	git push testrepo master 2>stderr &&
-	! grep "warning.*this may cause confusion" stderr
+	! grep "warning: updating the current branch" stderr
 '
 
 test_expect_success 'fetch with branches' '

@@ -44,16 +44,14 @@ char *write_idx_file(char *index_name, struct pack_idx_entry **objects,
 
 	if (!index_name) {
 		static char tmpfile[PATH_MAX];
-		snprintf(tmpfile, sizeof(tmpfile),
-			 "%s/pack/tmp_idx_XXXXXX", get_object_directory());
-		fd = xmkstemp(tmpfile);
+		fd = odb_mkstemp(tmpfile, sizeof(tmpfile), "pack/tmp_idx_XXXXXX");
 		index_name = xstrdup(tmpfile);
 	} else {
 		unlink(index_name);
 		fd = open(index_name, O_CREAT|O_EXCL|O_WRONLY, 0600);
 	}
 	if (fd < 0)
-		die("unable to create %s: %s", index_name, strerror(errno));
+		die_errno("unable to create '%s'", index_name);
 	f = sha1fd(fd, index_name);
 
 	/* if last object's offset is >= 2^31 we should use index V2 */
@@ -176,11 +174,11 @@ void fixup_pack_header_footer(int pack_fd,
 	git_SHA1_Init(&new_sha1_ctx);
 
 	if (lseek(pack_fd, 0, SEEK_SET) != 0)
-		die("Failed seeking to start of %s: %s", pack_name, strerror(errno));
+		die_errno("Failed seeking to start of '%s'", pack_name);
 	if (read_in_full(pack_fd, &hdr, sizeof(hdr)) != sizeof(hdr))
-		die("Unable to reread header of %s: %s", pack_name, strerror(errno));
+		die_errno("Unable to reread header of '%s'", pack_name);
 	if (lseek(pack_fd, 0, SEEK_SET) != 0)
-		die("Failed seeking to start of %s: %s", pack_name, strerror(errno));
+		die_errno("Failed seeking to start of '%s'", pack_name);
 	git_SHA1_Update(&old_sha1_ctx, &hdr, sizeof(hdr));
 	hdr.hdr_entries = htonl(object_count);
 	git_SHA1_Update(&new_sha1_ctx, &hdr, sizeof(hdr));
@@ -197,7 +195,7 @@ void fixup_pack_header_footer(int pack_fd,
 		if (!n)
 			break;
 		if (n < 0)
-			die("Failed to checksum %s: %s", pack_name, strerror(errno));
+			die_errno("Failed to checksum '%s'", pack_name);
 		git_SHA1_Update(&new_sha1_ctx, buf, n);
 
 		aligned_sz -= n;
@@ -239,7 +237,7 @@ char *index_pack_lockfile(int ip_out)
 	char packname[46];
 
 	/*
-	 * The first thing we expects from index-pack's output
+	 * The first thing we expect from index-pack's output
 	 * is "pack\t%40s\n" or "keep\t%40s\n" (46 bytes) where
 	 * %40s is the newly created pack SHA1 name.  In the "keep"
 	 * case, we need it to remove the corresponding .keep file

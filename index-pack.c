@@ -8,6 +8,7 @@
 #include "tree.h"
 #include "progress.h"
 #include "fsck.h"
+#include "exec_cmd.h"
 
 static const char index_pack_usage[] =
 "git index-pack [-v] [-o <index-file>] [{ ---keep | --keep=<msg> }] [--strict] { <pack-file> | --stdin [--fix-thin] [<pack-file>] }";
@@ -142,7 +143,7 @@ static void *fill(int min)
 		if (ret <= 0) {
 			if (!ret)
 				die("early EOF");
-			die("read error on input: %s", strerror(errno));
+			die_errno("read error on input");
 		}
 		input_len += ret;
 		if (from_stdin)
@@ -171,20 +172,18 @@ static char *open_pack_file(char *pack_name)
 		input_fd = 0;
 		if (!pack_name) {
 			static char tmpfile[PATH_MAX];
-			snprintf(tmpfile, sizeof(tmpfile),
-				 "%s/pack/tmp_pack_XXXXXX", get_object_directory());
-			output_fd = xmkstemp(tmpfile);
+			output_fd = odb_mkstemp(tmpfile, sizeof(tmpfile),
+						"pack/tmp_pack_XXXXXX");
 			pack_name = xstrdup(tmpfile);
 		} else
 			output_fd = open(pack_name, O_CREAT|O_EXCL|O_RDWR, 0600);
 		if (output_fd < 0)
-			die("unable to create %s: %s\n", pack_name, strerror(errno));
+			die_errno("unable to create '%s'", pack_name);
 		pack_fd = output_fd;
 	} else {
 		input_fd = open(pack_name, O_RDONLY);
 		if (input_fd < 0)
-			die("cannot open packfile '%s': %s",
-			    pack_name, strerror(errno));
+			die_errno("cannot open packfile '%s'", pack_name);
 		output_fd = -1;
 		pack_fd = input_fd;
 	}
@@ -232,7 +231,7 @@ static void free_base_data(struct base_data *c)
 
 static void prune_base_data(struct base_data *retain)
 {
-	struct base_data *b = base_cache;
+	struct base_data *b;
 	for (b = base_cache;
 	     base_cache_used > delta_base_cache_limit && b;
 	     b = b->child) {
@@ -275,10 +274,10 @@ static void *unpack_entry_data(unsigned long offset, unsigned long size)
 	stream.avail_out = size;
 	stream.next_in = fill(1);
 	stream.avail_in = input_len;
-	inflateInit(&stream);
+	git_inflate_init(&stream);
 
 	for (;;) {
-		int ret = inflate(&stream, 0);
+		int ret = git_inflate(&stream, 0);
 		use(input_len - stream.avail_in);
 		if (stream.total_out == size && ret == Z_STREAM_END)
 			break;
@@ -287,14 +286,14 @@ static void *unpack_entry_data(unsigned long offset, unsigned long size)
 		stream.next_in = fill(1);
 		stream.avail_in = input_len;
 	}
-	inflateEnd(&stream);
+	git_inflate_end(&stream);
 	return buf;
 }
 
 static void *unpack_raw_entry(struct object_entry *obj, union delta_base *delta_base)
 {
-	unsigned char *p, c;
-	unsigned long size;
+	unsigned char *p;
+	unsigned long size, c;
 	off_t base_offset;
 	unsigned shift;
 	void *data;
@@ -312,7 +311,7 @@ static void *unpack_raw_entry(struct object_entry *obj, union delta_base *delta_
 		p = fill(1);
 		c = *p;
 		use(1);
-		size += (c & 0x7fUL) << shift;
+		size += (c & 0x7f) << shift;
 		shift += 7;
 	}
 	obj->size = size;
@@ -370,7 +369,7 @@ static void *get_data_from_pack(struct object_entry *obj)
 	do {
 		ssize_t n = pread(pack_fd, data + rdy, len - rdy, from + rdy);
 		if (n < 0)
-			die("cannot pread pack file: %s", strerror(errno));
+			die_errno("cannot pread pack file");
 		if (!n)
 			die("premature end of pack file, %lu bytes missing",
 			    len - rdy);
@@ -382,9 +381,9 @@ static void *get_data_from_pack(struct object_entry *obj)
 	stream.avail_out = obj->size;
 	stream.next_in = src;
 	stream.avail_in = len;
-	inflateInit(&stream);
-	while ((st = inflate(&stream, Z_FINISH)) == Z_OK);
-	inflateEnd(&stream);
+	git_inflate_init(&stream);
+	while ((st = git_inflate(&stream, Z_FINISH)) == Z_OK);
+	git_inflate_end(&stream);
 	if (st != Z_STREAM_END || stream.total_out != obj->size)
 		die("serious inflate inconsistency");
 	free(src);
@@ -469,7 +468,7 @@ static void sha1_object(const void *data, unsigned long size,
 				die("invalid %s", typename(type));
 			if (fsck_object(obj, 1, fsck_error_function))
 				die("Error in object");
-			if (fsck_walk(obj, mark_link, 0))
+			if (fsck_walk(obj, mark_link, NULL))
 				die("Not all child objects of %s are reachable", sha1_to_hex(obj->sha1));
 
 			if (obj->type == OBJ_TREE) {
@@ -631,7 +630,7 @@ static void parse_pack_objects(unsigned char *sha1)
 
 	/* If input_fd is a file, we should have reached its end now. */
 	if (fstat(input_fd, &st))
-		die("cannot fstat packfile: %s", strerror(errno));
+		die_errno("cannot fstat packfile");
 	if (S_ISREG(st.st_mode) &&
 			lseek(input_fd, 0, SEEK_CUR) - input_len != st.st_size)
 		die("pack has junk at the end");
@@ -788,27 +787,29 @@ static void final(const char *final_pack_name, const char *curr_pack_name,
 		fsync_or_die(output_fd, curr_pack_name);
 		err = close(output_fd);
 		if (err)
-			die("error while closing pack file: %s", strerror(errno));
+			die_errno("error while closing pack file");
 	}
 
 	if (keep_msg) {
 		int keep_fd, keep_msg_len = strlen(keep_msg);
-		if (!keep_name) {
-			snprintf(name, sizeof(name), "%s/pack/pack-%s.keep",
-				 get_object_directory(), sha1_to_hex(sha1));
-			keep_name = name;
-		}
-		keep_fd = open(keep_name, O_RDWR|O_CREAT|O_EXCL, 0600);
+
+		if (!keep_name)
+			keep_fd = odb_pack_keep(name, sizeof(name), sha1);
+		else
+			keep_fd = open(keep_name, O_RDWR|O_CREAT|O_EXCL, 0600);
+
 		if (keep_fd < 0) {
 			if (errno != EEXIST)
-				die("cannot write keep file");
+				die_errno("cannot write keep file '%s'",
+					  keep_name);
 		} else {
 			if (keep_msg_len > 0) {
 				write_or_die(keep_fd, keep_msg, keep_msg_len);
 				write_or_die(keep_fd, "\n", 1);
 			}
 			if (close(keep_fd) != 0)
-				die("cannot write keep file");
+				die_errno("cannot close written keep file '%s'",
+				    keep_name);
 			report = "keep";
 		}
 	}
@@ -821,8 +822,7 @@ static void final(const char *final_pack_name, const char *curr_pack_name,
 		}
 		if (move_temp_to_file(curr_pack_name, final_pack_name))
 			die("cannot store pack file");
-	}
-	if (from_stdin)
+	} else if (from_stdin)
 		chmod(final_pack_name, 0444);
 
 	if (final_index_name != curr_index_name) {
@@ -833,8 +833,8 @@ static void final(const char *final_pack_name, const char *curr_pack_name,
 		}
 		if (move_temp_to_file(curr_index_name, final_index_name))
 			die("cannot store index file");
-	}
-	chmod(final_index_name, 0444);
+	} else
+		chmod(final_index_name, 0444);
 
 	if (!from_stdin) {
 		printf("%s\n", sha1_to_hex(sha1));
@@ -879,6 +879,8 @@ int main(int argc, char **argv)
 	char *index_name_buf = NULL, *keep_name_buf = NULL;
 	struct pack_idx_entry **idx_objects;
 	unsigned char pack_sha1[20];
+
+	git_extract_argv0_path(argv[0]);
 
 	/*
 	 * We wish to read the repository's config file if any, and

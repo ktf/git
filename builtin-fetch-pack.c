@@ -13,6 +13,7 @@
 static int transfer_unpack_limit = -1;
 static int fetch_unpack_limit = -1;
 static int unpack_limit = 100;
+static int prefer_ofs_delta = 1;
 static struct fetch_pack_args args = {
 	/* .uploadpack = */ "git-upload-pack",
 };
@@ -111,7 +112,7 @@ static void mark_common(struct commit *commit,
   Get the next rev to send, ignoring the common.
 */
 
-static const unsigned char* get_rev(void)
+static const unsigned char *get_rev(void)
 {
 	struct commit *commit = NULL;
 
@@ -200,7 +201,7 @@ static int find_common(int fd[2], unsigned char *result_sha1,
 				     (args.use_thin_pack ? " thin-pack" : ""),
 				     (args.no_progress ? " no-progress" : ""),
 				     (args.include_tag ? " include-tag" : ""),
-				     " ofs-delta");
+				     (prefer_ofs_delta ? " ofs-delta" : ""));
 		else
 			packet_write(fd[1], "want %s\n", sha1_to_hex(remote));
 		fetching++;
@@ -216,9 +217,8 @@ static int find_common(int fd[2], unsigned char *result_sha1,
 	if (args.depth > 0) {
 		char line[1024];
 		unsigned char sha1[20];
-		int len;
 
-		while ((len = packet_read_line(fd[0], line, sizeof(line)))) {
+		while (packet_read_line(fd[0], line, sizeof(line))) {
 			if (!prefixcmp(line, "shallow ")) {
 				if (get_sha1_hex(line + 8, sha1))
 					die("invalid shallow line: %s", line);
@@ -483,7 +483,9 @@ static int sideband_demux(int fd, void *data)
 {
 	int *xd = data;
 
-	return recv_sideband("fetch-pack", xd[0], fd, 2);
+	int ret = recv_sideband("fetch-pack", xd[0], fd);
+	close(fd);
+	return ret;
 }
 
 static int get_pack(int xd[2], char **pack_lockfile)
@@ -597,6 +599,11 @@ static struct ref *do_fetch_pack(int fd[2],
 			fprintf(stderr, "Server supports side-band\n");
 		use_sideband = 1;
 	}
+	if (server_supports("ofs-delta")) {
+		if (args.verbose)
+			fprintf(stderr, "Server supports ofs-delta\n");
+	} else
+		prefer_ofs_delta = 0;
 	if (everything_local(&ref, nr_match, match)) {
 		packet_flush(fd[1]);
 		goto all_done;
@@ -606,7 +613,7 @@ static struct ref *do_fetch_pack(int fd[2],
 			/* When cloning, it is not unusual to have
 			 * no common commit.
 			 */
-			fprintf(stderr, "warning: no common commits\n");
+			warning("no common commits");
 
 	if (get_pack(fd, pack_lockfile))
 		die("git fetch-pack: fetch failed.");
@@ -646,6 +653,11 @@ static int fetch_pack_config(const char *var, const char *value, void *cb)
 
 	if (strcmp(var, "transfer.unpacklimit") == 0) {
 		transfer_unpack_limit = git_config_int(var, value);
+		return 0;
+	}
+
+	if (strcmp(var, "repack.usedeltabaseoffset") == 0) {
+		prefer_ofs_delta = git_config_bool(var, value);
 		return 0;
 	}
 
@@ -801,15 +813,13 @@ struct ref *fetch_pack(struct fetch_pack_args *my_args,
 		int fd;
 
 		mtime.sec = st.st_mtime;
-#ifdef USE_NSEC
-		mtime.usec = st.st_mtim.usec;
-#endif
+		mtime.nsec = ST_MTIME_NSEC(st);
 		if (stat(shallow, &st)) {
 			if (mtime.sec)
 				die("shallow file was removed during fetch");
 		} else if (st.st_mtime != mtime.sec
 #ifdef USE_NSEC
-				|| st.st_mtim.usec != mtime.usec
+				|| ST_MTIME_NSEC(st) != mtime.nsec
 #endif
 			  )
 			die("shallow file was changed during fetch");
@@ -817,7 +827,7 @@ struct ref *fetch_pack(struct fetch_pack_args *my_args,
 		fd = hold_lock_file_for_update(&lock, shallow,
 					       LOCK_DIE_ON_ERROR);
 		if (!write_shallow_commits(fd, 0)) {
-			unlink(shallow);
+			unlink_or_warn(shallow);
 			rollback_lock_file(&lock);
 		} else {
 			commit_lock_file(&lock);

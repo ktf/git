@@ -14,6 +14,7 @@
 #include "builtin.h"
 #include "string-list.h"
 #include "dir.h"
+#include "parse-options.h"
 
 /*
  *  --check turns on checking that the working tree matches the
@@ -45,9 +46,11 @@ static int apply_verbosely;
 static int no_add;
 static const char *fake_ancestor;
 static int line_termination = '\n';
-static unsigned long p_context = ULONG_MAX;
-static const char apply_usage[] =
-"git apply [--stat] [--numstat] [--summary] [--check] [--index] [--cached] [--apply] [--no-add] [--index-info] [--allow-binary-replacement] [--reverse] [--reject] [--verbose] [-z] [-pNUM] [-CNUM] [--whitespace=<nowarn|warn|fix|error|error-all>] <patch>...";
+static unsigned int p_context = UINT_MAX;
+static const char * const apply_usage[] = {
+	"git apply [options] [<patch>...]",
+	NULL
+};
 
 static enum ws_error_action {
 	nowarn_ws_error,
@@ -61,6 +64,8 @@ static int applied_after_fixing_ws;
 static const char *patch_input_file;
 static const char *root;
 static int root_len;
+static int read_stdin = 1;
+static int options;
 
 static void parse_whitespace_option(const char *option)
 {
@@ -275,7 +280,7 @@ static void say_patch_name(FILE *output, const char *pre,
 static void read_patch_file(struct strbuf *sb, int fd)
 {
 	if (strbuf_read(sb, fd, 0) < 0)
-		die("git apply: read returned %s", strerror(errno));
+		die_errno("git apply: failed to read");
 
 	/*
 	 * Make sure that we have some slop in the buffer
@@ -315,6 +320,20 @@ static int name_terminate(const char *name, int namelen, int c, int terminate)
 	return 1;
 }
 
+/* remove double slashes to make --index work with such filenames */
+static char *squash_slash(char *name)
+{
+	int i = 0, j = 0;
+
+	while (name[i]) {
+		if ((name[j++] = name[i++]) == '/')
+			while (name[i] == '/')
+				i++;
+	}
+	name[j] = '\0';
+	return name;
+}
+
 static char *find_name(const char *line, char *def, int p_value, int terminate)
 {
 	int len;
@@ -344,7 +363,7 @@ static char *find_name(const char *line, char *def, int p_value, int terminate)
 				free(def);
 				if (root)
 					strbuf_insert(&name, 0, root, root_len);
-				return strbuf_detach(&name, NULL);
+				return squash_slash(strbuf_detach(&name, NULL));
 			}
 		}
 		strbuf_release(&name);
@@ -364,10 +383,10 @@ static char *find_name(const char *line, char *def, int p_value, int terminate)
 			start = line;
 	}
 	if (!start)
-		return def;
+		return squash_slash(def);
 	len = line - start;
 	if (!len)
-		return def;
+		return squash_slash(def);
 
 	/*
 	 * Generally we prefer the shorter name, especially
@@ -378,7 +397,7 @@ static char *find_name(const char *line, char *def, int p_value, int terminate)
 	if (def) {
 		int deflen = strlen(def);
 		if (deflen < len && !strncmp(start, def, deflen))
-			return def;
+			return squash_slash(def);
 		free(def);
 	}
 
@@ -387,10 +406,10 @@ static char *find_name(const char *line, char *def, int p_value, int terminate)
 		strcpy(ret, root);
 		memcpy(ret + root_len, start, len);
 		ret[root_len + len] = '\0';
-		return ret;
+		return squash_slash(ret);
 	}
 
-	return xmemdupz(start, len);
+	return squash_slash(xmemdupz(start, len));
 }
 
 static int count_slashes(const char *cp)
@@ -630,7 +649,7 @@ static int gitdiff_index(const char *line, struct patch *patch)
 	memcpy(patch->new_sha1_prefix, line, len);
 	patch->new_sha1_prefix[len] = 0;
 	if (*ptr == ' ')
-		patch->new_mode = patch->old_mode = strtoul(ptr+1, NULL, 8);
+		patch->old_mode = strtoul(ptr+1, NULL, 8);
 	return 0;
 }
 
@@ -1253,8 +1272,9 @@ static char *inflate_it(const void *data, unsigned long size,
 	stream.avail_in = size;
 	stream.next_out = out = xmalloc(inflated_size);
 	stream.avail_out = inflated_size;
-	inflateInit(&stream);
-	st = inflate(&stream, Z_FINISH);
+	git_inflate_init(&stream);
+	st = git_inflate(&stream, Z_FINISH);
+	git_inflate_end(&stream);
 	if ((st != Z_STREAM_END) || stream.total_out != inflated_size) {
 		free(out);
 		return NULL;
@@ -2265,6 +2285,25 @@ static struct patch *in_fn_table(const char *name)
 	return NULL;
 }
 
+/*
+ * item->util in the filename table records the status of the path.
+ * Usually it points at a patch (whose result records the contents
+ * of it after applying it), but it could be PATH_WAS_DELETED for a
+ * path that a previously applied patch has already removed.
+ */
+ #define PATH_TO_BE_DELETED ((struct patch *) -2)
+#define PATH_WAS_DELETED ((struct patch *) -1)
+
+static int to_be_deleted(struct patch *patch)
+{
+	return patch == PATH_TO_BE_DELETED;
+}
+
+static int was_deleted(struct patch *patch)
+{
+	return patch == PATH_WAS_DELETED;
+}
+
 static void add_to_fn_table(struct patch *patch)
 {
 	struct string_list_item *item;
@@ -2285,7 +2324,22 @@ static void add_to_fn_table(struct patch *patch)
 	 */
 	if ((patch->new_name == NULL) || (patch->is_rename)) {
 		item = string_list_insert(patch->old_name, &fn_table);
-		item->util = (struct patch *) -1;
+		item->util = PATH_WAS_DELETED;
+	}
+}
+
+static void prepare_fn_table(struct patch *patch)
+{
+	/*
+	 * store information about incoming file deletion
+	 */
+	while (patch) {
+		if ((patch->new_name == NULL) || (patch->is_rename)) {
+			struct string_list_item *item;
+			item = string_list_insert(patch->old_name, &fn_table);
+			item->util = PATH_TO_BE_DELETED;
+		}
+		patch = patch->next;
 	}
 }
 
@@ -2298,8 +2352,8 @@ static int apply_data(struct patch *patch, struct stat *st, struct cache_entry *
 	struct patch *tpatch;
 
 	if (!(patch->is_copy || patch->is_rename) &&
-	    ((tpatch = in_fn_table(patch->old_name)) != NULL)) {
-		if (tpatch == (struct patch *) -1) {
+	    (tpatch = in_fn_table(patch->old_name)) != NULL && !to_be_deleted(tpatch)) {
+		if (was_deleted(tpatch)) {
 			return error("patch %s has been renamed/deleted",
 				patch->old_name);
 		}
@@ -2354,7 +2408,7 @@ static int check_to_create_blob(const char *new_name, int ok_if_exists)
 		 * In such a case, path "new_name" does not exist as
 		 * far as git is concerned.
 		 */
-		if (has_symlink_leading_path(strlen(new_name), new_name))
+		if (has_symlink_leading_path(new_name, strlen(new_name)))
 			return 0;
 
 		return error("%s: already exists in working directory", new_name);
@@ -2393,16 +2447,18 @@ static int check_preimage(struct patch *patch, struct cache_entry **ce, struct s
 	assert(patch->is_new <= 0);
 
 	if (!(patch->is_copy || patch->is_rename) &&
-	    (tpatch = in_fn_table(old_name)) != NULL) {
-		if (tpatch == (struct patch *) -1) {
+	    (tpatch = in_fn_table(old_name)) != NULL && !to_be_deleted(tpatch)) {
+		if (was_deleted(tpatch))
 			return error("%s: has been deleted/renamed", old_name);
-		}
 		st_mode = tpatch->new_mode;
 	} else if (!cached) {
 		stat_ret = lstat(old_name, st);
 		if (stat_ret && errno != ENOENT)
 			return error("%s: %s", old_name, strerror(errno));
 	}
+
+	if (to_be_deleted(tpatch))
+		tpatch = NULL;
 
 	if (check_index && !tpatch) {
 		int pos = cache_name_pos(old_name, strlen(old_name));
@@ -2435,7 +2491,7 @@ static int check_preimage(struct patch *patch, struct cache_entry **ce, struct s
 		return error("%s: %s", old_name, strerror(errno));
 	}
 
-	if (!cached)
+	if (!cached && !tpatch)
 		st_mode = ce_mode_from_stat(*ce, st->st_mode);
 
 	if (patch->is_new < 0)
@@ -2445,8 +2501,10 @@ static int check_preimage(struct patch *patch, struct cache_entry **ce, struct s
 	if ((st_mode ^ patch->old_mode) & S_IFMT)
 		return error("%s: wrong type", old_name);
 	if (st_mode != patch->old_mode)
-		fprintf(stderr, "warning: %s has type %o, expected %o\n",
+		warning("%s has type %o, expected %o",
 			old_name, st_mode, patch->old_mode);
+	if (!patch->new_mode && !patch->is_delete)
+		patch->new_mode = st_mode;
 	return 0;
 
  is_new:
@@ -2463,6 +2521,7 @@ static int check_patch(struct patch *patch)
 	const char *new_name = patch->new_name;
 	const char *name = old_name ? old_name : new_name;
 	struct cache_entry *ce = NULL;
+	struct patch *tpatch;
 	int ok_if_exists;
 	int status;
 
@@ -2473,7 +2532,8 @@ static int check_patch(struct patch *patch)
 		return status;
 	old_name = patch->old_name;
 
-	if (in_fn_table(new_name) == (struct patch *) -1)
+	if ((tpatch = in_fn_table(new_name)) &&
+			(was_deleted(tpatch) || to_be_deleted(tpatch)))
 		/*
 		 * A type-change diff is always split into a patch to
 		 * delete old, immediately followed by a patch to
@@ -2525,6 +2585,7 @@ static int check_patch_list(struct patch *patch)
 {
 	int err = 0;
 
+	prepare_fn_table(patch);
 	while (patch) {
 		if (apply_verbosely)
 			say_patch_name(stderr,
@@ -2553,7 +2614,7 @@ static int get_current_sha1(const char *path, unsigned char *sha1)
 static void build_fake_ancestor(struct patch *list, const char *filename)
 {
 	struct patch *patch;
-	struct index_state result = { 0 };
+	struct index_state result = { NULL };
 	int fd;
 
 	/* Once we start supporting the reverse patch, it may be
@@ -2734,7 +2795,7 @@ static void remove_file(struct patch *patch, int rmdir_empty)
 			if (rmdir(patch->old_name))
 				warning("unable to remove submodule %s",
 					patch->old_name);
-		} else if (!unlink(patch->old_name) && rmdir_empty) {
+		} else if (!unlink_or_warn(patch->old_name) && rmdir_empty) {
 			remove_path(patch->old_name);
 		}
 	}
@@ -2762,8 +2823,8 @@ static void add_index_file(const char *path, unsigned mode, void *buf, unsigned 
 	} else {
 		if (!cached) {
 			if (lstat(path, &st) < 0)
-				die("unable to stat newly created file %s",
-				    path);
+				die_errno("unable to stat newly created file '%s'",
+					  path);
 			fill_stat_cache_info(ce, &st);
 		}
 		if (write_sha1_file(buf, size, blob_type, ce->sha1) < 0)
@@ -2803,7 +2864,7 @@ static int try_create_file(const char *path, unsigned int mode, const char *buf,
 	strbuf_release(&nbuf);
 
 	if (close(fd) < 0)
-		die("closing file %s: %s", path, strerror(errno));
+		die_errno("closing file '%s'", path);
 	return 0;
 }
 
@@ -2844,7 +2905,7 @@ static void create_one_file(char *path, unsigned mode, const char *buf, unsigned
 			if (!try_create_file(newpath, mode, buf, size)) {
 				if (!rename(newpath, path))
 					return;
-				unlink(newpath);
+				unlink_or_warn(newpath);
 				break;
 			}
 			if (errno != EEXIST)
@@ -2852,7 +2913,7 @@ static void create_one_file(char *path, unsigned mode, const char *buf, unsigned
 			++nr;
 		}
 	}
-	die("unable to write file %s mode %o", path, mode);
+	die_errno("unable to write file '%s' mode %o", path, mode);
 }
 
 static void create_file(struct patch *patch)
@@ -2924,8 +2985,7 @@ static int write_out_one_reject(struct patch *patch)
 	cnt = strlen(patch->new_name);
 	if (ARRAY_SIZE(namebuf) <= cnt + 5) {
 		cnt = ARRAY_SIZE(namebuf) - 5;
-		fprintf(stderr,
-			"warning: truncating .rej filename to %.*s.rej",
+		warning("truncating .rej filename to %.*s.rej",
 			cnt - 1, patch->new_name);
 	}
 	memcpy(namebuf, patch->new_name, cnt);
@@ -3135,16 +3195,133 @@ static int git_apply_config(const char *var, const char *value, void *cb)
 	return git_default_config(var, value, cb);
 }
 
+static int option_parse_exclude(const struct option *opt,
+				const char *arg, int unset)
+{
+	add_name_limit(arg, 1);
+	return 0;
+}
+
+static int option_parse_include(const struct option *opt,
+				const char *arg, int unset)
+{
+	add_name_limit(arg, 0);
+	has_include = 1;
+	return 0;
+}
+
+static int option_parse_p(const struct option *opt,
+			  const char *arg, int unset)
+{
+	p_value = atoi(arg);
+	p_value_known = 1;
+	return 0;
+}
+
+static int option_parse_z(const struct option *opt,
+			  const char *arg, int unset)
+{
+	if (unset)
+		line_termination = '\n';
+	else
+		line_termination = 0;
+	return 0;
+}
+
+static int option_parse_whitespace(const struct option *opt,
+				   const char *arg, int unset)
+{
+	const char **whitespace_option = opt->value;
+
+	*whitespace_option = arg;
+	parse_whitespace_option(arg);
+	return 0;
+}
+
+static int option_parse_directory(const struct option *opt,
+				  const char *arg, int unset)
+{
+	root_len = strlen(arg);
+	if (root_len && arg[root_len - 1] != '/') {
+		char *new_root;
+		root = new_root = xmalloc(root_len + 2);
+		strcpy(new_root, arg);
+		strcpy(new_root + root_len++, "/");
+	} else
+		root = arg;
+	return 0;
+}
 
 int cmd_apply(int argc, const char **argv, const char *unused_prefix)
 {
 	int i;
-	int read_stdin = 1;
-	int options = 0;
 	int errs = 0;
 	int is_not_gitdir;
+	int binary;
+	int force_apply = 0;
 
 	const char *whitespace_option = NULL;
+
+	struct option builtin_apply_options[] = {
+		{ OPTION_CALLBACK, 0, "exclude", NULL, "path",
+			"don't apply changes matching the given path",
+			0, option_parse_exclude },
+		{ OPTION_CALLBACK, 0, "include", NULL, "path",
+			"apply changes matching the given path",
+			0, option_parse_include },
+		{ OPTION_CALLBACK, 'p', NULL, NULL, "num",
+			"remove <num> leading slashes from traditional diff paths",
+			0, option_parse_p },
+		OPT_BOOLEAN(0, "no-add", &no_add,
+			"ignore additions made by the patch"),
+		OPT_BOOLEAN(0, "stat", &diffstat,
+			"instead of applying the patch, output diffstat for the input"),
+		{ OPTION_BOOLEAN, 0, "allow-binary-replacement", &binary,
+		  NULL, "old option, now no-op",
+		  PARSE_OPT_HIDDEN | PARSE_OPT_NOARG },
+		{ OPTION_BOOLEAN, 0, "binary", &binary,
+		  NULL, "old option, now no-op",
+		  PARSE_OPT_HIDDEN | PARSE_OPT_NOARG },
+		OPT_BOOLEAN(0, "numstat", &numstat,
+			"shows number of added and deleted lines in decimal notation"),
+		OPT_BOOLEAN(0, "summary", &summary,
+			"instead of applying the patch, output a summary for the input"),
+		OPT_BOOLEAN(0, "check", &check,
+			"instead of applying the patch, see if the patch is applicable"),
+		OPT_BOOLEAN(0, "index", &check_index,
+			"make sure the patch is applicable to the current index"),
+		OPT_BOOLEAN(0, "cached", &cached,
+			"apply a patch without touching the working tree"),
+		OPT_BOOLEAN(0, "apply", &force_apply,
+			"also apply the patch (use with --stat/--summary/--check)"),
+		OPT_FILENAME(0, "build-fake-ancestor", &fake_ancestor,
+			"build a temporary index based on embedded index information"),
+		{ OPTION_CALLBACK, 'z', NULL, NULL, NULL,
+			"paths are separated with NUL character",
+			PARSE_OPT_NOARG, option_parse_z },
+		OPT_INTEGER('C', NULL, &p_context,
+				"ensure at least <n> lines of context match"),
+		{ OPTION_CALLBACK, 0, "whitespace", &whitespace_option, "action",
+			"detect new or modified lines that have whitespace errors",
+			0, option_parse_whitespace },
+		OPT_BOOLEAN('R', "reverse", &apply_in_reverse,
+			"apply the patch in reverse"),
+		OPT_BOOLEAN(0, "unidiff-zero", &unidiff_zero,
+			"don't expect at least one line of context"),
+		OPT_BOOLEAN(0, "reject", &apply_with_reject,
+			"leave the rejected hunks in corresponding *.rej files"),
+		OPT__VERBOSE(&apply_verbosely),
+		OPT_BIT(0, "inaccurate-eof", &options,
+			"tolerate incorrectly detected missing new-line at the end of file",
+			INACCURATE_EOF),
+		OPT_BIT(0, "recount", &options,
+			"do not trust the line counts in the hunk headers",
+			RECOUNT),
+		{ OPTION_CALLBACK, 0, "directory", NULL, "root",
+			"prepend <root> to all filenames",
+			0, option_parse_directory },
+		OPT_END()
+	};
 
 	prefix = setup_git_directory_gently(&is_not_gitdir);
 	prefix_length = prefix ? strlen(prefix) : 0;
@@ -3152,139 +3329,34 @@ int cmd_apply(int argc, const char **argv, const char *unused_prefix)
 	if (apply_default_whitespace)
 		parse_whitespace_option(apply_default_whitespace);
 
-	for (i = 1; i < argc; i++) {
+	argc = parse_options(argc, argv, prefix, builtin_apply_options,
+			apply_usage, 0);
+
+	if (apply_with_reject)
+		apply = apply_verbosely = 1;
+	if (!force_apply && (diffstat || numstat || summary || check || fake_ancestor))
+		apply = 0;
+	if (check_index && is_not_gitdir)
+		die("--index outside a repository");
+	if (cached) {
+		if (is_not_gitdir)
+			die("--cached outside a repository");
+		check_index = 1;
+	}
+	for (i = 0; i < argc; i++) {
 		const char *arg = argv[i];
-		char *end;
 		int fd;
 
 		if (!strcmp(arg, "-")) {
 			errs |= apply_patch(0, "<stdin>", options);
 			read_stdin = 0;
 			continue;
-		}
-		if (!prefixcmp(arg, "--exclude=")) {
-			add_name_limit(arg + 10, 1);
-			continue;
-		}
-		if (!prefixcmp(arg, "--include=")) {
-			add_name_limit(arg + 10, 0);
-			has_include = 1;
-			continue;
-		}
-		if (!prefixcmp(arg, "-p")) {
-			p_value = atoi(arg + 2);
-			p_value_known = 1;
-			continue;
-		}
-		if (!strcmp(arg, "--no-add")) {
-			no_add = 1;
-			continue;
-		}
-		if (!strcmp(arg, "--stat")) {
-			apply = 0;
-			diffstat = 1;
-			continue;
-		}
-		if (!strcmp(arg, "--allow-binary-replacement") ||
-		    !strcmp(arg, "--binary")) {
-			continue; /* now no-op */
-		}
-		if (!strcmp(arg, "--numstat")) {
-			apply = 0;
-			numstat = 1;
-			continue;
-		}
-		if (!strcmp(arg, "--summary")) {
-			apply = 0;
-			summary = 1;
-			continue;
-		}
-		if (!strcmp(arg, "--check")) {
-			apply = 0;
-			check = 1;
-			continue;
-		}
-		if (!strcmp(arg, "--index")) {
-			if (is_not_gitdir)
-				die("--index outside a repository");
-			check_index = 1;
-			continue;
-		}
-		if (!strcmp(arg, "--cached")) {
-			if (is_not_gitdir)
-				die("--cached outside a repository");
-			check_index = 1;
-			cached = 1;
-			continue;
-		}
-		if (!strcmp(arg, "--apply")) {
-			apply = 1;
-			continue;
-		}
-		if (!strcmp(arg, "--build-fake-ancestor")) {
-			apply = 0;
-			if (++i >= argc)
-				die ("need a filename");
-			fake_ancestor = argv[i];
-			continue;
-		}
-		if (!strcmp(arg, "-z")) {
-			line_termination = 0;
-			continue;
-		}
-		if (!prefixcmp(arg, "-C")) {
-			p_context = strtoul(arg + 2, &end, 0);
-			if (*end != '\0')
-				die("unrecognized context count '%s'", arg + 2);
-			continue;
-		}
-		if (!prefixcmp(arg, "--whitespace=")) {
-			whitespace_option = arg + 13;
-			parse_whitespace_option(arg + 13);
-			continue;
-		}
-		if (!strcmp(arg, "-R") || !strcmp(arg, "--reverse")) {
-			apply_in_reverse = 1;
-			continue;
-		}
-		if (!strcmp(arg, "--unidiff-zero")) {
-			unidiff_zero = 1;
-			continue;
-		}
-		if (!strcmp(arg, "--reject")) {
-			apply = apply_with_reject = apply_verbosely = 1;
-			continue;
-		}
-		if (!strcmp(arg, "-v") || !strcmp(arg, "--verbose")) {
-			apply_verbosely = 1;
-			continue;
-		}
-		if (!strcmp(arg, "--inaccurate-eof")) {
-			options |= INACCURATE_EOF;
-			continue;
-		}
-		if (!strcmp(arg, "--recount")) {
-			options |= RECOUNT;
-			continue;
-		}
-		if (!prefixcmp(arg, "--directory=")) {
-			arg += strlen("--directory=");
-			root_len = strlen(arg);
-			if (root_len && arg[root_len - 1] != '/') {
-				char *new_root;
-				root = new_root = xmalloc(root_len + 2);
-				strcpy(new_root, arg);
-				strcpy(new_root + root_len++, "/");
-			} else
-				root = arg;
-			continue;
-		}
-		if (0 < prefix_length)
+		} else if (0 < prefix_length)
 			arg = prefix_filename(prefix, prefix_length, arg);
 
 		fd = open(arg, O_RDONLY);
 		if (fd < 0)
-			die("can't open patch '%s': %s", arg, strerror(errno));
+			die_errno("can't open patch '%s'", arg);
 		read_stdin = 0;
 		set_default_whitespace_mode(whitespace_option);
 		errs |= apply_patch(fd, arg, options);
@@ -3298,8 +3370,8 @@ int cmd_apply(int argc, const char **argv, const char *unused_prefix)
 		    squelch_whitespace_errors < whitespace_error) {
 			int squelched =
 				whitespace_error - squelch_whitespace_errors;
-			fprintf(stderr, "warning: squelched %d "
-				"whitespace error%s\n",
+			warning("squelched %d "
+				"whitespace error%s",
 				squelched,
 				squelched == 1 ? "" : "s");
 		}
@@ -3309,12 +3381,12 @@ int cmd_apply(int argc, const char **argv, const char *unused_prefix)
 			    whitespace_error == 1 ? "" : "s",
 			    whitespace_error == 1 ? "s" : "");
 		if (applied_after_fixing_ws && apply)
-			fprintf(stderr, "warning: %d line%s applied after"
-				" fixing whitespace errors.\n",
+			warning("%d line%s applied after"
+				" fixing whitespace errors.",
 				applied_after_fixing_ws,
 				applied_after_fixing_ws == 1 ? "" : "s");
 		else if (whitespace_error)
-			fprintf(stderr, "warning: %d line%s add%s whitespace errors.\n",
+			warning("%d line%s add%s whitespace errors.",
 				whitespace_error,
 				whitespace_error == 1 ? "" : "s",
 				whitespace_error == 1 ? "s" : "");

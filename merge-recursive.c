@@ -38,7 +38,7 @@ static struct tree *shift_tree_object(struct tree *one, struct tree *two)
  * A virtual commit has (const char *)commit->util set to the name.
  */
 
-struct commit *make_virtual_commit(struct tree *tree, const char *comment)
+static struct commit *make_virtual_commit(struct tree *tree, const char *comment)
 {
 	struct commit *commit = xcalloc(1, sizeof(struct commit));
 	commit->tree = tree;
@@ -237,7 +237,7 @@ static int save_files_dirs(const unsigned char *sha1,
 		string_list_insert(newpath, &o->current_file_set);
 	free(newpath);
 
-	return READ_TREE_RECURSIVE;
+	return (S_ISDIR(mode) ? READ_TREE_RECURSIVE : 0);
 }
 
 static int get_files_dirs(struct merge_options *o, struct tree *tree)
@@ -438,13 +438,37 @@ static void flush_buffer(int fd, const char *buf, unsigned long size)
 			/* Ignore epipe */
 			if (errno == EPIPE)
 				break;
-			die("merge-recursive: %s", strerror(errno));
+			die_errno("merge-recursive");
 		} else if (!ret) {
 			die("merge-recursive: disk full?");
 		}
 		size -= ret;
 		buf += ret;
 	}
+}
+
+static int would_lose_untracked(const char *path)
+{
+	int pos = cache_name_pos(path, strlen(path));
+
+	if (pos < 0)
+		pos = -1 - pos;
+	while (pos < active_nr &&
+	       !strcmp(path, active_cache[pos]->name)) {
+		/*
+		 * If stage #0, it is definitely tracked.
+		 * If it has stage #2 then it was tracked
+		 * before this merge started.  All other
+		 * cases the path was not tracked.
+		 */
+		switch (ce_stage(active_cache[pos])) {
+		case 0:
+		case 2:
+			return 0;
+		}
+		pos++;
+	}
+	return file_exists(path);
 }
 
 static int make_room_for_path(const char *path)
@@ -461,6 +485,14 @@ static int make_room_for_path(const char *path)
 		}
 		die(msg, path, "");
 	}
+
+	/*
+	 * Do not unlink a file in the work tree if we are not
+	 * tracking it.
+	 */
+	if (would_lose_untracked(path))
+		return error("refusing to lose untracked file at '%s'",
+			     path);
 
 	/* Successful unlink is good.. */
 	if (!unlink(path))
@@ -488,8 +520,12 @@ static void update_file_flags(struct merge_options *o,
 		unsigned long size;
 
 		if (S_ISGITLINK(mode))
-			die("cannot read object %s '%s': It is a submodule!",
-			    sha1_to_hex(sha), path);
+			/*
+			 * We may later decide to recursively descend into
+			 * the submodule directory and update its index
+			 * and/or work tree, but we do not do that now.
+			 */
+			goto update_index;
 
 		buf = read_sha1_file(sha, &type, &size);
 		if (!buf)
@@ -518,7 +554,7 @@ static void update_file_flags(struct merge_options *o,
 				mode = 0666;
 			fd = open(path, O_WRONLY | O_TRUNC | O_CREAT, mode);
 			if (fd < 0)
-				die("failed to open %s: %s", path, strerror(errno));
+				die_errno("failed to open '%s'", path);
 			flush_buffer(fd, buf, size);
 			close(fd);
 		} else if (S_ISLNK(mode)) {
@@ -526,7 +562,7 @@ static void update_file_flags(struct merge_options *o,
 			safe_create_leading_directories_const(path);
 			unlink(path);
 			if (symlink(lnk, path))
-				die("failed to symlink %s: %s", path, strerror(errno));
+				die_errno("failed to symlink '%s'", path);
 			free(lnk);
 		} else
 			die("do not know what to do with %06o %s '%s'",
@@ -586,8 +622,13 @@ static int merge_3way(struct merge_options *o,
 	char *name1, *name2;
 	int merge_status;
 
-	name1 = xstrdup(mkpath("%s:%s", branch1, a->path));
-	name2 = xstrdup(mkpath("%s:%s", branch2, b->path));
+	if (strcmp(a->path, b->path)) {
+		name1 = xstrdup(mkpath("%s:%s", branch1, a->path));
+		name2 = xstrdup(mkpath("%s:%s", branch2, b->path));
+	} else {
+		name1 = xstrdup(mkpath("%s", branch1));
+		name2 = xstrdup(mkpath("%s", branch2));
+	}
 
 	fill_mm(one->sha1, &orig);
 	fill_mm(a->sha1, &src1);
@@ -769,22 +810,19 @@ static int process_renames(struct merge_options *o,
 	}
 
 	for (i = 0, j = 0; i < a_renames->nr || j < b_renames->nr;) {
-		int compare;
 		char *src;
-		struct string_list *renames1, *renames2, *renames2Dst;
+		struct string_list *renames1, *renames2Dst;
 		struct rename *ren1 = NULL, *ren2 = NULL;
 		const char *branch1, *branch2;
 		const char *ren1_src, *ren1_dst;
 
 		if (i >= a_renames->nr) {
-			compare = 1;
 			ren2 = b_renames->items[j++].util;
 		} else if (j >= b_renames->nr) {
-			compare = -1;
 			ren1 = a_renames->items[i++].util;
 		} else {
-			compare = strcmp(a_renames->items[i].string,
-					b_renames->items[j].string);
+			int compare = strcmp(a_renames->items[i].string,
+					     b_renames->items[j].string);
 			if (compare <= 0)
 				ren1 = a_renames->items[i++].util;
 			if (compare >= 0)
@@ -794,14 +832,12 @@ static int process_renames(struct merge_options *o,
 		/* TODO: refactor, so that 1/2 are not needed */
 		if (ren1) {
 			renames1 = a_renames;
-			renames2 = b_renames;
 			renames2Dst = &b_by_dst;
 			branch1 = o->branch1;
 			branch2 = o->branch2;
 		} else {
 			struct rename *tmp;
 			renames1 = b_renames;
-			renames2 = a_renames;
 			renames2Dst = &a_by_dst;
 			branch1 = o->branch2;
 			branch2 = o->branch1;
@@ -902,6 +938,12 @@ static int process_renames(struct merge_options *o,
 				       ren1_src, ren1_dst, branch1,
 				       branch2);
 				update_file(o, 0, ren1->pair->two->sha1, ren1->pair->two->mode, ren1_dst);
+				if (!o->call_depth)
+					update_stages(ren1_dst, NULL,
+							branch1 == o->branch1 ?
+							ren1->pair->two : NULL,
+							branch1 == o->branch1 ?
+							NULL : ren1->pair->two, 1);
 			} else if (!sha_eq(dst_other.sha1, null_sha1)) {
 				const char *new_path;
 				clean_merge = 0;
@@ -1084,21 +1126,13 @@ static int process_entry(struct merge_options *o,
 				 o->branch1, o->branch2);
 
 		clean_merge = mfi.clean;
-		if (mfi.clean)
-			update_file(o, 1, mfi.sha, mfi.mode, path);
-		else if (S_ISGITLINK(mfi.mode))
-			output(o, 1, "CONFLICT (submodule): Merge conflict in %s "
-			       "- needs %s", path, sha1_to_hex(b.sha1));
-		else {
+		if (!mfi.clean) {
+			if (S_ISGITLINK(mfi.mode))
+				reason = "submodule";
 			output(o, 1, "CONFLICT (%s): Merge conflict in %s",
 					reason, path);
-
-			if (o->call_depth)
-				update_file(o, 0, mfi.sha, mfi.mode, path);
-			else
-				update_file_flags(o, mfi.sha, mfi.mode, path,
-					      0 /* update_cache */, 1 /* update_working_directory */);
 		}
+		update_file(o, mfi.clean, mfi.sha, mfi.mode, path);
 	} else if (!o_sha && !a_sha && !b_sha) {
 		/*
 		 * this entry was deleted altogether. a_mode == 0 means

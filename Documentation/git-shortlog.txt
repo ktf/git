@@ -45,19 +45,16 @@ OPTIONS
 	and subsequent lines are indented by `indent2` spaces. `width`,
 	`indent1`, and `indent2` default to 76, 6 and 9 respectively.
 
-FILES
------
 
-If the file `.mailmap` exists, it will be used for mapping author
-email addresses to a real author name. One mapping per line, first
-the author name followed by the email address enclosed by
-'<' and '>'. Use hash '#' for comments. Example:
+MAPPING AUTHORS
+---------------
 
-------------
-# Keep alphabetized
-Adam Morrow <adam@localhost.localdomain>
-Eve Jones <eve@laptop.(none)>
-------------
+The `.mailmap` feature is used to coalesce together commits by the same
+person in the shortlog, where their name and/or email address was
+spelled differently.
+
+include::mailmap.txt[]
+
 
 Author
 ------

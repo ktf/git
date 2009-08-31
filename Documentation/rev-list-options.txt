@@ -13,7 +13,7 @@ include::pretty-options.txt[]
 
 	Synonym for `--date=relative`.
 
---date={relative,local,default,iso,rfc,short}::
+--date={relative,local,default,iso,rfc,short,raw}::
 
 	Only takes effect for dates shown in human-readable format, such
 	as when using "--pretty". `log.date` config variable sets a default
@@ -30,6 +30,8 @@ e.g. "2 hours ago".
 format, often found in E-mail messages.
 +
 `--date=short` shows only date but not time, in `YYYY-MM-DD` format.
++
+`--date=raw` shows the date in the internal raw git format `%s %z` format.
 +
 `--date=default` shows timestamps in the original timezone
 (either committer's or author's).
@@ -138,38 +140,38 @@ limiting may be applied.
 --
 
 -n 'number'::
---max-count='number'::
+--max-count=<number>::
 
 	Limit the number of commits output.
 
---skip='number'::
+--skip=<number>::
 
 	Skip 'number' commits before starting to show the commit output.
 
---since='date'::
---after='date'::
+--since=<date>::
+--after=<date>::
 
 	Show commits more recent than a specific date.
 
---until='date'::
---before='date'::
+--until=<date>::
+--before=<date>::
 
 	Show commits older than a specific date.
 
 ifdef::git-rev-list[]
---max-age='timestamp'::
---min-age='timestamp'::
+--max-age=<timestamp>::
+--min-age=<timestamp>::
 
 	Limit the commits output to specified time range.
 endif::git-rev-list[]
 
---author='pattern'::
---committer='pattern'::
+--author=<pattern>::
+--committer=<pattern>::
 
 	Limit the commits output to ones with author/committer
 	header lines that match the specified pattern (regular expression).
 
---grep='pattern'::
+--grep=<pattern>::
 
 	Limit the commits output to ones with log message that
 	matches the specified pattern (regular expression).
@@ -198,6 +200,10 @@ endif::git-rev-list[]
 --remove-empty::
 
 	Stop when a given path disappears from the tree.
+
+--merges::
+
+	Print only merge commits.
 
 --no-merges::
 
@@ -566,11 +572,11 @@ This outputs all the commit objects between the included and excluded
 commits, ordered by their distance to the included and excluded
 commits. The farthest from them is displayed first. (This is the only
 one displayed by `--bisect`.)
-
++
 This is useful because it makes it easy to choose a good commit to
 test when you want to avoid to test some of them for some reason (they
 may not compile for example).
-
++
 This option can be used along with `--bisect-vars`, in this case,
 after all the sorted commit objects, there will be the same text as if
 `--bisect-vars` had been used alone.

@@ -153,9 +153,9 @@ static int estimate_similarity(struct diff_filespec *src,
 	 * is a possible size - we really should have a flag to
 	 * say whether the size is valid or not!)
 	 */
-	if (!src->cnt_data && diff_populate_filespec(src, 0))
+	if (!src->cnt_data && diff_populate_filespec(src, 1))
 		return 0;
-	if (!dst->cnt_data && diff_populate_filespec(dst, 0))
+	if (!dst->cnt_data && diff_populate_filespec(dst, 1))
 		return 0;
 
 	max_size = ((src->size > dst->size) ? src->size : dst->size);
@@ -171,6 +171,11 @@ static int estimate_similarity(struct diff_filespec *src,
 	 * divide-by-zero issue.
 	 */
 	if (base_size * (MAX_SCORE-minimum_score) < delta_size * MAX_SCORE)
+		return 0;
+
+	if (!src->cnt_data && diff_populate_filespec(src, 0))
+		return 0;
+	if (!dst->cnt_data && diff_populate_filespec(dst, 0))
 		return 0;
 
 	delta_limit = (unsigned long)
@@ -262,7 +267,7 @@ static int find_identical_files(struct file_similarity *src,
 			int score;
 			struct diff_filespec *source = p->filespec;
 
-			/* False hash collission? */
+			/* False hash collision? */
 			if (hashcmp(source->sha1, target->sha1))
 				continue;
 			/* Non-regular files? If so, the modes must match! */

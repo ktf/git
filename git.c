@@ -2,9 +2,10 @@
 #include "exec_cmd.h"
 #include "cache.h"
 #include "quote.h"
+#include "run-command.h"
 
 const char git_usage_string[] =
-	"git [--version] [--exec-path[=GIT_EXEC_PATH]] [-p|--paginate|--no-pager] [--bare] [--git-dir=GIT_DIR] [--work-tree=GIT_WORK_TREE] [--help] COMMAND [ARGS]";
+	"git [--version] [--exec-path[=GIT_EXEC_PATH]] [--html-path] [-p|--paginate|--no-pager] [--bare] [--git-dir=GIT_DIR] [--work-tree=GIT_WORK_TREE] [--help] COMMAND [ARGS]";
 
 const char git_more_info_string[] =
 	"See 'git help COMMAND' for more information on a specific command.";
@@ -46,7 +47,7 @@ static void commit_pager_choice(void) {
 	}
 }
 
-static int handle_options(const char*** argv, int* argc, int* envchanged)
+static int handle_options(const char ***argv, int *argc, int *envchanged)
 {
 	int handled = 0;
 
@@ -74,6 +75,9 @@ static int handle_options(const char*** argv, int* argc, int* envchanged)
 				puts(git_exec_path());
 				exit(0);
 			}
+		} else if (!strcmp(cmd, "--html-path")) {
+			puts(system_path(GIT_HTML_PATH));
+			exit(0);
 		} else if (!strcmp(cmd, "-p") || !strcmp(cmd, "--paginate")) {
 			use_pager = 1;
 		} else if (!strcmp(cmd, "--no-pager")) {
@@ -132,7 +136,7 @@ static int handle_alias(int *argcp, const char ***argv)
 	int envchanged = 0, ret = 0, saved_errno = errno;
 	const char *subdir;
 	int count, option_count;
-	const char** new_argv;
+	const char **new_argv;
 	const char *alias_command;
 	char *alias_string;
 	int unused_nongit;
@@ -158,7 +162,7 @@ static int handle_alias(int *argcp, const char ***argv)
 			if (ret >= 0 && WIFEXITED(ret) &&
 			    WEXITSTATUS(ret) != 127)
 				exit(WEXITSTATUS(ret));
-			die("Failed to run '%s' when expanding alias '%s'\n",
+			die("Failed to run '%s' when expanding alias '%s'",
 			    alias_string + 1, alias_command);
 		}
 		count = split_cmdline(alias_string, &new_argv);
@@ -183,11 +187,10 @@ static int handle_alias(int *argcp, const char ***argv)
 				  "trace: alias expansion: %s =>",
 				  alias_command);
 
-		new_argv = xrealloc(new_argv, sizeof(char*) *
-				    (count + *argcp + 1));
+		new_argv = xrealloc(new_argv, sizeof(char *) *
+				    (count + *argcp));
 		/* insert after command name */
-		memcpy(new_argv + count, *argv + 1, sizeof(char*) * *argcp);
-		new_argv[count+*argcp] = NULL;
+		memcpy(new_argv + count, *argv + 1, sizeof(char *) * *argcp);
 
 		*argv = new_argv;
 		*argcp += count - 1;
@@ -196,7 +199,7 @@ static int handle_alias(int *argcp, const char ***argv)
 	}
 
 	if (subdir && chdir(subdir))
-		die("Cannot change to %s: %s", subdir, strerror(errno));
+		die_errno("Cannot change to '%s'", subdir);
 
 	errno = saved_errno;
 
@@ -219,7 +222,7 @@ struct cmd_struct {
 	int option;
 };
 
-static int run_command(struct cmd_struct *p, int argc, const char **argv)
+static int run_builtin(struct cmd_struct *p, int argc, const char **argv)
 {
 	int status;
 	struct stat st;
@@ -242,7 +245,7 @@ static int run_command(struct cmd_struct *p, int argc, const char **argv)
 
 	status = p->fn(argc, argv, prefix);
 	if (status)
-		return status & 0xff;
+		return status;
 
 	/* Somebody closed stdout? */
 	if (fstat(fileno(stdout), &st))
@@ -253,11 +256,11 @@ static int run_command(struct cmd_struct *p, int argc, const char **argv)
 
 	/* Check for ENOSPC and EIO errors.. */
 	if (fflush(stdout))
-		die("write failure on standard output: %s", strerror(errno));
+		die_errno("write failure on standard output");
 	if (ferror(stdout))
 		die("unknown write failure on standard output");
 	if (fclose(stdout))
-		die("close failed on standard output: %s", strerror(errno));
+		die_errno("close failed on standard output");
 	return 0;
 }
 
@@ -270,6 +273,7 @@ static void handle_internal_command(int argc, const char **argv)
 		{ "annotate", cmd_annotate, RUN_SETUP },
 		{ "apply", cmd_apply },
 		{ "archive", cmd_archive },
+		{ "bisect--helper", cmd_bisect__helper, RUN_SETUP | NEED_WORK_TREE },
 		{ "blame", cmd_blame, RUN_SETUP },
 		{ "branch", cmd_branch, RUN_SETUP },
 		{ "bundle", cmd_bundle },
@@ -322,6 +326,7 @@ static void handle_internal_command(int argc, const char **argv)
 		{ "merge-ours", cmd_merge_ours, RUN_SETUP },
 		{ "merge-recursive", cmd_merge_recursive, RUN_SETUP | NEED_WORK_TREE },
 		{ "merge-subtree", cmd_merge_recursive, RUN_SETUP | NEED_WORK_TREE },
+		{ "mktree", cmd_mktree, RUN_SETUP },
 		{ "mv", cmd_mv, RUN_SETUP | NEED_WORK_TREE },
 		{ "name-rev", cmd_name_rev, RUN_SETUP },
 		{ "pack-objects", cmd_pack_objects, RUN_SETUP },
@@ -384,7 +389,7 @@ static void handle_internal_command(int argc, const char **argv)
 		struct cmd_struct *p = commands+i;
 		if (strcmp(p->cmd, cmd))
 			continue;
-		exit(run_command(p, argc, argv));
+		exit(run_builtin(p, argc, argv));
 	}
 }
 
@@ -392,6 +397,7 @@ static void execv_dashed_external(const char **argv)
 {
 	struct strbuf cmd = STRBUF_INIT;
 	const char *tmp;
+	int status;
 
 	strbuf_addf(&cmd, "git-%s", argv[0]);
 
@@ -406,36 +412,54 @@ static void execv_dashed_external(const char **argv)
 
 	trace_argv_printf(argv, "trace: exec:");
 
-	/* execvp() can only ever return if it fails */
-	execvp(cmd.buf, (char **)argv);
-
-	trace_printf("trace: exec failed: %s\n", strerror(errno));
+	/*
+	 * if we fail because the command is not found, it is
+	 * OK to return. Otherwise, we just pass along the status code.
+	 */
+	status = run_command_v_opt(argv, 0);
+	if (status != -ERR_RUN_COMMAND_EXEC) {
+		if (IS_RUN_COMMAND_ERR(status))
+			die("unable to run '%s'", argv[0]);
+		exit(-status);
+	}
+	errno = ENOENT; /* as if we called execvp */
 
 	argv[0] = tmp;
 
 	strbuf_release(&cmd);
 }
 
+static int run_argv(int *argcp, const char ***argv)
+{
+	int done_alias = 0;
+
+	while (1) {
+		/* See if it's an internal command */
+		handle_internal_command(*argcp, *argv);
+
+		/* .. then try the external ones */
+		execv_dashed_external(*argv);
+
+		/* It could be an alias -- this works around the insanity
+		 * of overriding "git log" with "git show" by having
+		 * alias.log = show
+		 */
+		if (done_alias || !handle_alias(argcp, argv))
+			break;
+		done_alias = 1;
+	}
+
+	return done_alias;
+}
+
 
 int main(int argc, const char **argv)
 {
-	const char *cmd = argv[0] && *argv[0] ? argv[0] : "git-help";
-	char *slash = (char *)cmd + strlen(cmd);
-	int done_alias = 0;
+	const char *cmd;
 
-	/*
-	 * Take the basename of argv[0] as the command
-	 * name, and the dirname as the default exec_path
-	 * if we don't have anything better.
-	 */
-	do
-		--slash;
-	while (cmd <= slash && !is_dir_sep(*slash));
-	if (cmd <= slash) {
-		*slash++ = 0;
-		git_set_argv0_path(cmd);
-		cmd = slash;
-	}
+	cmd = git_extract_argv0_path(argv[0]);
+	if (!cmd)
+		cmd = "git-help";
 
 	/*
 	 * "git-xxxx" is the same as "git xxxx", but we obviously:
@@ -473,38 +497,29 @@ int main(int argc, const char **argv)
 
 	/*
 	 * We use PATH to find git commands, but we prepend some higher
-	 * precidence paths: the "--exec-path" option, the GIT_EXEC_PATH
+	 * precedence paths: the "--exec-path" option, the GIT_EXEC_PATH
 	 * environment, and the $(gitexecdir) from the Makefile at build
 	 * time.
 	 */
 	setup_path();
 
 	while (1) {
-		/* See if it's an internal command */
-		handle_internal_command(argc, argv);
-
-		/* .. then try the external ones */
-		execv_dashed_external(argv);
-
-		/* It could be an alias -- this works around the insanity
-		 * of overriding "git log" with "git show" by having
-		 * alias.log = show
-		 */
-		if (done_alias || !handle_alias(&argc, &argv))
+		static int done_help = 0;
+		static int was_alias = 0;
+		was_alias = run_argv(&argc, &argv);
+		if (errno != ENOENT)
 			break;
-		done_alias = 1;
-	}
-
-	if (errno == ENOENT) {
-		if (done_alias) {
+		if (was_alias) {
 			fprintf(stderr, "Expansion of alias '%s' failed; "
 				"'%s' is not a git-command\n",
 				cmd, argv[0]);
 			exit(1);
 		}
-		argv[0] = help_unknown_cmd(cmd);
-		handle_internal_command(argc, argv);
-		execv_dashed_external(argv);
+		if (!done_help) {
+			cmd = argv[0] = help_unknown_cmd(cmd);
+			done_help = 1;
+		} else
+			break;
 	}
 
 	fprintf(stderr, "Failed to run command '%s': %s\n",

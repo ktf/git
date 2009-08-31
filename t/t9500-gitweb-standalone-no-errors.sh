@@ -43,9 +43,11 @@ gitweb_run () {
 	GATEWAY_INTERFACE="CGI/1.1"
 	HTTP_ACCEPT="*/*"
 	REQUEST_METHOD="GET"
+	SCRIPT_NAME="$TEST_DIRECTORY/../gitweb/gitweb.perl"
 	QUERY_STRING=""$1""
 	PATH_INFO=""$2""
-	export GATEWAY_INTERFACE HTTP_ACCEPT REQUEST_METHOD QUERY_STRING PATH_INFO
+	export GATEWAY_INTERFACE HTTP_ACCEPT REQUEST_METHOD \
+		SCRIPT_NAME QUERY_STRING PATH_INFO
 
 	GITWEB_CONFIG=$(pwd)/gitweb_config.perl
 	export GITWEB_CONFIG
@@ -54,27 +56,23 @@ gitweb_run () {
 	# written to web server logs, so we are not interested in that:
 	# we are interested only in properly formatted errors/warnings
 	rm -f gitweb.log &&
-	perl -- "$TEST_DIRECTORY/../gitweb/gitweb.perl" \
+	perl -- "$SCRIPT_NAME" \
 		>/dev/null 2>gitweb.log &&
 	if grep "^[[]" gitweb.log >/dev/null 2>&1; then false; else true; fi
 
 	# gitweb.log is left for debugging
 }
 
-safe_chmod () {
-	chmod "$1" "$2" &&
-	if [ "$(git config --get core.filemode)" = false ]
-	then
-		git update-index --chmod="$1" "$2"
-	fi
-}
-
 . ./test-lib.sh
 
+if ! test_have_prereq PERL; then
+	say 'skipping gitweb tests, perl not available'
+	test_done
+fi
+
 perl -MEncode -e 'decode_utf8("", Encode::FB_CROAK)' >/dev/null 2>&1 || {
-    test_expect_success 'skipping gitweb tests, perl version is too old' :
+    say 'skipping gitweb tests, perl version is too old'
     test_done
-    exit
 }
 
 gitweb_init
@@ -240,7 +238,7 @@ test_debug 'cat gitweb.log'
 
 test_expect_success \
 	'commitdiff(0): mode change' \
-	'safe_chmod +x new_file &&
+	'test_chmod +x new_file &&
 	 git commit -a -m "Mode changed." &&
 	 gitweb_run "p=.git;a=commitdiff"'
 test_debug 'cat gitweb.log'
@@ -252,7 +250,7 @@ test_expect_success \
 	 gitweb_run "p=.git;a=commitdiff"'
 test_debug 'cat gitweb.log'
 
-test_expect_success \
+test_expect_success SYMLINKS \
 	'commitdiff(0): file to symlink' \
 	'rm renamed_file &&
 	 ln -s file renamed_file &&
@@ -279,7 +277,7 @@ test_debug 'cat gitweb.log'
 test_expect_success \
 	'commitdiff(0): mode change and modified' \
 	'echo "New line" >> file2 &&
-	 safe_chmod +x file2 &&
+	 test_chmod +x file2 &&
 	 git commit -a -m "Mode change and modification." &&
 	 gitweb_run "p=.git;a=commitdiff"'
 test_debug 'cat gitweb.log'
@@ -306,7 +304,7 @@ test_expect_success \
 	'commitdiff(0): renamed, mode change and modified' \
 	'git mv file3 file2 &&
 	 echo "Propter nomen suum." >> file2 &&
-	 safe_chmod +x file2 &&
+	 test_chmod +x file2 &&
 	 git commit -a -m "File rename, mode change and modification." &&
 	 gitweb_run "p=.git;a=commitdiff"'
 test_debug 'cat gitweb.log'
@@ -314,7 +312,7 @@ test_debug 'cat gitweb.log'
 # ----------------------------------------------------------------------
 # commitdiff testing (taken from t4114-apply-typechange.sh)
 
-test_expect_success 'setup typechange commits' '
+test_expect_success SYMLINKS 'setup typechange commits' '
 	echo "hello world" > foo &&
 	echo "hi planet" > bar &&
 	git update-index --add foo bar &&
@@ -423,10 +421,15 @@ test_expect_success \
 	 git add 03-new &&
 	 git mv 04-rename-from 04-rename-to &&
 	 echo "Changed" >> 04-rename-to &&
-	 safe_chmod +x 05-mode-change &&
-	 rm -f 06-file-or-symlink && ln -s 01-change 06-file-or-symlink &&
+	 test_chmod +x 05-mode-change &&
+	 rm -f 06-file-or-symlink &&
+	 if test_have_prereq SYMLINKS; then
+		ln -s 01-change 06-file-or-symlink
+	 else
+		printf %s 01-change > 06-file-or-symlink
+	 fi &&
 	 echo "Changed and have mode changed" > 07-change-mode-change	&&
-	 safe_chmod +x 07-change-mode-change &&
+	 test_chmod +x 07-change-mode-change &&
 	 git commit -a -m "Large commit" &&
 	 git checkout master'
 
@@ -587,7 +590,7 @@ test_expect_success \
 	 echo "ISO-8859-1" >> file &&
 	 git add file &&
 	 git config i18n.commitencoding ISO-8859-1 &&
-	 git commit -F "$TEST_DIRECTORY"/t3900/ISO-8859-1.txt &&
+	 git commit -F "$TEST_DIRECTORY"/t3900/ISO8859-1.txt &&
 	 git config --unset i18n.commitencoding &&
 	 gitweb_run "p=.git;a=commit"'
 test_debug 'cat gitweb.log'
@@ -657,20 +660,38 @@ cat >>gitweb_config.perl <<EOF
 
 \$feature{'blame'}{'override'} = 1;
 \$feature{'snapshot'}{'override'} = 1;
+\$feature{'avatar'}{'override'} = 1;
 EOF
+
+test_expect_success \
+	'config override: tree view, features not overridden in repo config' \
+	'gitweb_run "p=.git;a=tree"'
+test_debug 'cat gitweb.log'
 
 test_expect_success \
 	'config override: tree view, features disabled in repo config' \
 	'git config gitweb.blame no &&
 	 git config gitweb.snapshot none &&
+	 git config gitweb.avatar gravatar &&
 	 gitweb_run "p=.git;a=tree"'
 test_debug 'cat gitweb.log'
 
 test_expect_success \
-	'config override: tree view, features enabled in repo config' \
+	'config override: tree view, features enabled in repo config (1)' \
 	'git config gitweb.blame yes &&
 	 git config gitweb.snapshot "zip,tgz, tbz2" &&
 	 gitweb_run "p=.git;a=tree"'
+test_debug 'cat gitweb.log'
+
+cat >.git/config <<\EOF
+# testing noval and alternate separator
+[gitweb]
+	blame
+	snapshot = zip tgz
+EOF
+test_expect_success \
+	'config override: tree view, features enabled in repo config (2)' \
+	'gitweb_run "p=.git;a=tree"'
 test_debug 'cat gitweb.log'
 
 # ----------------------------------------------------------------------

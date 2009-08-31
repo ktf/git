@@ -40,6 +40,7 @@ static struct commands {
 } cmd_list[] = {
 	{ "git-receive-pack", do_generic_cmd },
 	{ "git-upload-pack", do_generic_cmd },
+	{ "git-upload-archive", do_generic_cmd },
 	{ "cvs", do_cvs_cmd },
 	{ NULL },
 };
@@ -59,7 +60,7 @@ int main(int argc, char **argv)
 	while (devnull_fd >= 0 && devnull_fd <= 2)
 		devnull_fd = dup(devnull_fd);
 	if (devnull_fd == -1)
-		die("opening /dev/null failed (%s)", strerror(errno));
+		die_errno("opening /dev/null failed");
 	close (devnull_fd);
 
 	/*

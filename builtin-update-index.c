@@ -195,7 +195,7 @@ static int process_path(const char *path)
 	struct stat st;
 
 	len = strlen(path);
-	if (has_symlink_leading_path(len, path))
+	if (has_symlink_leading_path(path, len))
 		return error("'%s' is beyond a symbolic link", path);
 
 	/*
@@ -292,7 +292,7 @@ static void update_one(const char *path, const char *prefix, int prefix_length)
 	report("add '%s'", path);
  free_return:
 	if (p < path || p > path + strlen(path))
-		free((char*)p);
+		free((char *)p);
 }
 
 static void read_index_info(int line_termination)
@@ -486,7 +486,7 @@ static int unresolve_one(const char *path)
 static void read_head_pointers(void)
 {
 	if (read_ref("HEAD", head_sha1))
-		die("No HEAD -- no initial commit yet?\n");
+		die("No HEAD -- no initial commit yet?");
 	if (read_ref("MERGE_HEAD", merge_head_sha1)) {
 		fprintf(stderr, "Not in the middle of a merge.\n");
 		exit(0);
@@ -509,7 +509,7 @@ static int do_unresolve(int ac, const char **av,
 		const char *p = prefix_path(prefix, prefix_length, arg);
 		err |= unresolve_one(p);
 		if (p < arg || p > arg + strlen(arg))
-			free((char*)p);
+			free((char *)p);
 	}
 	return err;
 }
@@ -712,7 +712,7 @@ int cmd_update_index(int argc, const char **argv, const char *prefix)
 		if (set_executable_bit)
 			chmod_path(set_executable_bit, p);
 		if (p < path || p > path + strlen(path))
-			free((char*)p);
+			free((char *)p);
 	}
 	if (read_from_stdin) {
 		struct strbuf buf = STRBUF_INIT, nbuf = STRBUF_INIT;
@@ -742,8 +742,7 @@ int cmd_update_index(int argc, const char **argv, const char *prefix)
 		if (newfd < 0) {
 			if (refresh_flags & REFRESH_QUIET)
 				exit(128);
-			die("unable to create '%s.lock': %s",
-			    get_index_file(), strerror(lock_error));
+			unable_to_lock_index_die(get_index_file(), lock_error);
 		}
 		if (write_cache(newfd, active_cache, active_nr) ||
 		    commit_locked_index(lock_file))

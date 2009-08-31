@@ -42,6 +42,8 @@ else \
 	if test "$withval" = "yes"; then \
 		AC_MSG_WARN([You should provide path for --with-$1=PATH]); \
 	else \
+		m4_toupper($1)_PATH=$withval; \
+		AC_MSG_NOTICE([Setting m4_toupper($1)_PATH to $withval]); \
 		GIT_CONF_APPEND_LINE(${PROGRAM}_PATH=$withval); \
 	fi; \
 fi; \
@@ -61,6 +63,8 @@ elif test "$withval" = "yes"; then \
 	m4_toupper(NO_$1)=; \
 else \
 	m4_toupper(NO_$1)=; \
+	m4_toupper($1)DIR=$withval; \
+	AC_MSG_NOTICE([Setting m4_toupper($1)DIR to $withval]); \
 	GIT_CONF_APPEND_LINE(${PACKAGE}DIR=$withval); \
 fi \
 ])# GIT_PARSE_WITH
@@ -76,6 +80,32 @@ AC_DEFUN([GIT_CHECK_FUNC],[AC_CHECK_FUNC([$1],[
   AC_SEARCH_LIBS([$1],,
   [$2],[$3])
 ],[$3])])
+
+dnl
+dnl GIT_STASH_FLAGS(BASEPATH_VAR)
+dnl -----------------------------
+dnl Allow for easy stashing of LDFLAGS and CPPFLAGS before running
+dnl tests that may want to take user settings into account.
+AC_DEFUN([GIT_STASH_FLAGS],[
+if test -n "$1"; then
+   old_CPPFLAGS="$CPPFLAGS"
+   old_LDFLAGS="$LDFLAGS"
+   CPPFLAGS="-I$1/include $CPPFLAGS"
+   LDFLAGS="-L$1/$lib $LDFLAGS"
+fi
+])
+
+dnl
+dnl GIT_UNSTASH_FLAGS(BASEPATH_VAR)
+dnl -----------------------------
+dnl Restore the stashed *FLAGS values.
+AC_DEFUN([GIT_UNSTASH_FLAGS],[
+if test -n "$1"; then
+   CPPFLAGS="$old_CPPFLAGS"
+   LDFLAGS="$old_LDFLAGS"
+fi
+])
+
 ## Site configuration related to programs (before tests)
 ## --with-PACKAGE[=ARG] and --without-PACKAGE
 #
@@ -86,9 +116,124 @@ AC_ARG_WITH([lib],
  [if test "$withval" = "no" || test "$withval" = "yes"; then \
 	AC_MSG_WARN([You should provide name for --with-lib=ARG]); \
 else \
+	lib=$withval; \
+	AC_MSG_NOTICE([Setting lib to '$lib']); \
 	GIT_CONF_APPEND_LINE(lib=$withval); \
 fi; \
 ],[])
+
+if test -z "$lib"; then
+   AC_MSG_NOTICE([Setting lib to 'lib' (the default)])
+   lib=lib
+fi
+
+AC_ARG_ENABLE([pthreads],
+ [AS_HELP_STRING([--enable-pthreads=FLAGS],
+  [FLAGS is the value to pass to the compiler to enable POSIX Threads.]
+  [The default if FLAGS is not specified is to try first -pthread]
+  [and then -lpthread.]
+  [--without-pthreads will disable threading.])],
+[
+if test "x$enableval" = "xyes"; then
+   AC_MSG_NOTICE([Will try -pthread then -lpthread to enable POSIX Threads])
+elif test "x$enableval" != "xno"; then
+   PTHREAD_CFLAGS=$enableval
+   AC_MSG_NOTICE([Setting '$PTHREAD_CFLAGS' as the FLAGS to enable POSIX Threads])
+else
+   AC_MSG_NOTICE([POSIX Threads will be disabled.])
+   NO_PTHREADS=YesPlease
+   USER_NOPTHREAD=1
+fi],
+[
+   AC_MSG_NOTICE([Will try -pthread then -lpthread to enable POSIX Threads.])
+])
+
+## Site configuration (override autodetection)
+## --with-PACKAGE[=ARG] and --without-PACKAGE
+AC_MSG_NOTICE([CHECKS for site configuration])
+#
+# Define NO_SVN_TESTS if you want to skip time-consuming SVN interoperability
+# tests.  These tests take up a significant amount of the total test time
+# but are not needed unless you plan to talk to SVN repos.
+#
+# Define MOZILLA_SHA1 environment variable when running make to make use of
+# a bundled SHA1 routine coming from Mozilla. It is GPL'd and should be fast
+# on non-x86 architectures (e.g. PowerPC), while the OpenSSL version (default
+# choice) has very fast version optimized for i586.
+#
+# Define PPC_SHA1 environment variable when running make to make use of
+# a bundled SHA1 routine optimized for PowerPC.
+#
+# Define ARM_SHA1 environment variable when running make to make use of
+# a bundled SHA1 routine optimized for ARM.
+#
+# Define NO_OPENSSL environment variable if you do not have OpenSSL.
+# This also implies MOZILLA_SHA1.
+#
+# Define OPENSSLDIR=/foo/bar if your openssl header and library files are in
+# /foo/bar/include and /foo/bar/lib directories.
+AC_ARG_WITH(openssl,
+AS_HELP_STRING([--with-openssl],[use OpenSSL library (default is YES)])
+AS_HELP_STRING([],              [ARG can be prefix for openssl library and headers]),\
+GIT_PARSE_WITH(openssl))
+#
+# Define NO_CURL if you do not have curl installed.  git-http-pull and
+# git-http-push are not built, and you cannot use http:// and https://
+# transports.
+#
+# Define CURLDIR=/foo/bar if your curl header and library files are in
+# /foo/bar/include and /foo/bar/lib directories.
+AC_ARG_WITH(curl,
+AS_HELP_STRING([--with-curl],[support http(s):// transports (default is YES)])
+AS_HELP_STRING([],           [ARG can be also prefix for curl library and headers]),
+GIT_PARSE_WITH(curl))
+#
+# Define NO_EXPAT if you do not have expat installed.  git-http-push is
+# not built, and you cannot push using http:// and https:// transports.
+#
+# Define EXPATDIR=/foo/bar if your expat header and library files are in
+# /foo/bar/include and /foo/bar/lib directories.
+AC_ARG_WITH(expat,
+AS_HELP_STRING([--with-expat],
+[support git-push using http:// and https:// transports via WebDAV (default is YES)])
+AS_HELP_STRING([],            [ARG can be also prefix for expat library and headers]),
+GIT_PARSE_WITH(expat))
+#
+# Define NO_FINK if you are building on Darwin/Mac OS X, have Fink
+# installed in /sw, but don't want GIT to link against any libraries
+# installed there.  If defined you may specify your own (or Fink's)
+# include directories and library directories by defining CFLAGS
+# and LDFLAGS appropriately.
+#
+# Define NO_DARWIN_PORTS if you are building on Darwin/Mac OS X,
+# have DarwinPorts installed in /opt/local, but don't want GIT to
+# link against any libraries installed there.  If defined you may
+# specify your own (or DarwinPort's) include directories and
+# library directories by defining CFLAGS and LDFLAGS appropriately.
+#
+# Define NO_MMAP if you want to avoid mmap.
+#
+# Define NO_ICONV if your libc does not properly support iconv.
+AC_ARG_WITH(iconv,
+AS_HELP_STRING([--without-iconv],
+[if your architecture doesn't properly support iconv])
+AS_HELP_STRING([--with-iconv=PATH],
+[PATH is prefix for libiconv library and headers])
+AS_HELP_STRING([],
+[used only if you need linking with libiconv]),
+GIT_PARSE_WITH(iconv))
+
+## --enable-FEATURE[=ARG] and --disable-FEATURE
+#
+# Define USE_NSEC below if you want git to care about sub-second file mtimes
+# and ctimes. Note that you need recent glibc (at least 2.2.4) for this, and
+# it will BREAK YOUR LOCAL DIFFS! show-diff and anything using it will likely
+# randomly break unless your underlying filesystem supports those sub-second
+# times (my ext3 doesn't).
+#
+# Define USE_STDEV below if you want git to care about the underlying device
+# change being considered an inode change from the update-index perspective.
+
 #
 # Define SHELL_PATH to provide path to shell.
 GIT_ARG_SET_PATH(shell)
@@ -114,31 +259,31 @@ AC_MSG_NOTICE([CHECKS for programs])
 #
 AC_PROG_CC([cc gcc])
 # which switch to pass runtime path to dynamic libraries to the linker
-AC_CACHE_CHECK([if linker supports -R], ld_dashr, [
+AC_CACHE_CHECK([if linker supports -R], git_cv_ld_dashr, [
    SAVE_LDFLAGS="${LDFLAGS}"
    LDFLAGS="${SAVE_LDFLAGS} -R /"
-   AC_LINK_IFELSE(AC_LANG_PROGRAM([], []), [ld_dashr=yes], [ld_dashr=no])
+   AC_LINK_IFELSE(AC_LANG_PROGRAM([], []), [git_cv_ld_dashr=yes], [git_cv_ld_dashr=no])
    LDFLAGS="${SAVE_LDFLAGS}"
 ])
-if test "$ld_dashr" = "yes"; then
+if test "$git_cv_ld_dashr" = "yes"; then
    AC_SUBST(CC_LD_DYNPATH, [-R])
 else
-   AC_CACHE_CHECK([if linker supports -Wl,-rpath,], ld_wl_rpath, [
+   AC_CACHE_CHECK([if linker supports -Wl,-rpath,], git_cv_ld_wl_rpath, [
       SAVE_LDFLAGS="${LDFLAGS}"
       LDFLAGS="${SAVE_LDFLAGS} -Wl,-rpath,/"
-      AC_LINK_IFELSE(AC_LANG_PROGRAM([], []), [ld_wl_rpath=yes], [ld_wl_rpath=no])
-      LDFLAGS="${SAVE_LD_FLAGS}"
+      AC_LINK_IFELSE(AC_LANG_PROGRAM([], []), [git_cv_ld_wl_rpath=yes], [git_cv_ld_wl_rpath=no])
+      LDFLAGS="${SAVE_LDFLAGS}"
    ])
-   if test "$ld_wl_rpath" = "yes"; then
+   if test "$git_cv_ld_wl_rpath" = "yes"; then
       AC_SUBST(CC_LD_DYNPATH, [-Wl,-rpath,])
    else
-      AC_CACHE_CHECK([if linker supports -rpath], ld_rpath, [
+      AC_CACHE_CHECK([if linker supports -rpath], git_cv_ld_rpath, [
          SAVE_LDFLAGS="${LDFLAGS}"
          LDFLAGS="${SAVE_LDFLAGS} -rpath /"
-         AC_LINK_IFELSE(AC_LANG_PROGRAM([], []), [ld_rpath=yes], [ld_rpath=no])
-         LDFLAGS="${SAVE_LD_FLAGS}"
+         AC_LINK_IFELSE(AC_LANG_PROGRAM([], []), [git_cv_ld_rpath=yes], [git_cv_ld_rpath=no])
+         LDFLAGS="${SAVE_LDFLAGS}"
       ])
-      if test "$ld_rpath" = "yes"; then
+      if test "$git_cv_ld_rpath" = "yes"; then
          AC_SUBST(CC_LD_DYNPATH, [-rpath])
       else
          AC_MSG_WARN([linker does not support runtime path to dynamic libraries])
@@ -167,7 +312,7 @@ fi
 AC_CHECK_PROGS(ASCIIDOC, [asciidoc])
 if test -n "$ASCIIDOC"; then
 	AC_MSG_CHECKING([for asciidoc version])
-	asciidoc_version=`$ASCIIDOC --version 2>&1`
+	asciidoc_version=`$ASCIIDOC --version 2>/dev/null`
 	case "${asciidoc_version}" in
 	asciidoc' '8*)
 		ASCIIDOC8=YesPlease
@@ -191,33 +336,58 @@ AC_MSG_NOTICE([CHECKS for libraries])
 #
 # Define NO_OPENSSL environment variable if you do not have OpenSSL.
 # Define NEEDS_SSL_WITH_CRYPTO if you need -lcrypto with -lssl (Darwin).
+
+GIT_STASH_FLAGS($OPENSSLDIR)
+
 AC_CHECK_LIB([crypto], [SHA1_Init],
 [NEEDS_SSL_WITH_CRYPTO=],
 [AC_CHECK_LIB([ssl], [SHA1_Init],
- [NEEDS_SSL_WITH_CRYPTO=YesPlease
-  NEEDS_SSL_WITH_CRYPTO=],
- [NO_OPENSSL=YesPlease])])
+ [NEEDS_SSL_WITH_CRYPTO=YesPlease],
+ [NEEDS_SSL_WITH_CRYPTO= NO_OPENSSL=YesPlease])])
+
+GIT_UNSTASH_FLAGS($OPENSSLDIR)
+
 AC_SUBST(NEEDS_SSL_WITH_CRYPTO)
 AC_SUBST(NO_OPENSSL)
+
 #
 # Define NO_CURL if you do not have libcurl installed.  git-http-pull and
 # git-http-push are not built, and you cannot use http:// and https://
 # transports.
+
+GIT_STASH_FLAGS($CURLDIR)
+
 AC_CHECK_LIB([curl], [curl_global_init],
 [NO_CURL=],
 [NO_CURL=YesPlease])
+
+GIT_UNSTASH_FLAGS($CURLDIR)
+
 AC_SUBST(NO_CURL)
+
 #
 # Define NO_EXPAT if you do not have expat installed.  git-http-push is
 # not built, and you cannot push using http:// and https:// transports.
+
+GIT_STASH_FLAGS($EXPATDIR)
+
 AC_CHECK_LIB([expat], [XML_ParserCreate],
 [NO_EXPAT=],
 [NO_EXPAT=YesPlease])
+
+GIT_UNSTASH_FLAGS($EXPATDIR)
+
 AC_SUBST(NO_EXPAT)
+
 #
 # Define NEEDS_LIBICONV if linking with libc is not enough (Darwin and
 # some Solaris installations).
 # Define NO_ICONV if neither libc nor libiconv support iconv.
+
+if test -z "$NO_ICONV"; then
+
+GIT_STASH_FLAGS($ICONVDIR)
+
 AC_DEFUN([ICONVTEST_SRC], [
 #include <iconv.h>
 
@@ -227,25 +397,52 @@ int main(void)
 	return 0;
 }
 ])
-AC_MSG_CHECKING([for iconv in -lc])
-AC_LINK_IFELSE(ICONVTEST_SRC,
+
+if test -n "$ICONVDIR"; then
+   lib_order="-liconv -lc"
+else
+   lib_order="-lc -liconv"
+fi
+
+NO_ICONV=YesPlease
+
+for l in $lib_order; do
+    if test "$l" = "-liconv"; then
+       NEEDS_LIBICONV=YesPlease
+    else
+       NEEDS_LIBICONV=
+    fi
+
+    old_LIBS="$LIBS"
+    LIBS="$LIBS $l"
+    AC_MSG_CHECKING([for iconv in $l])
+    AC_LINK_IFELSE(ICONVTEST_SRC,
 	[AC_MSG_RESULT([yes])
-	NEEDS_LIBICONV=],
-	[AC_MSG_RESULT([no])
-	old_LIBS="$LIBS"
-	LIBS="$LIBS -liconv"
-	AC_MSG_CHECKING([for iconv in -liconv])
-	AC_LINK_IFELSE(ICONVTEST_SRC,
-		[AC_MSG_RESULT([yes])
-		NEEDS_LIBICONV=YesPlease],
-		[AC_MSG_RESULT([no])
-		NO_ICONV=YesPlease])
-	LIBS="$old_LIBS"])
+	NO_ICONV=
+	break],
+	[AC_MSG_RESULT([no])])
+    LIBS="$old_LIBS"
+done
+
+#in case of break
+LIBS="$old_LIBS"
+
+GIT_UNSTASH_FLAGS($ICONVDIR)
+
 AC_SUBST(NEEDS_LIBICONV)
 AC_SUBST(NO_ICONV)
-test -n "$NEEDS_LIBICONV" && LIBS="$LIBS -liconv"
+
+if test -n "$NO_ICONV"; then
+    NEEDS_LIBICONV=
+fi
+
+fi
+
 #
 # Define NO_DEFLATE_BOUND if deflateBound is missing from zlib.
+
+GIT_STASH_FLAGS($ZLIB_PATH)
+
 AC_DEFUN([ZLIBTEST_SRC], [
 #include <zlib.h>
 
@@ -263,7 +460,11 @@ AC_LINK_IFELSE(ZLIBTEST_SRC,
 	[AC_MSG_RESULT([no])
 	NO_DEFLATE_BOUND=yes])
 LIBS="$old_LIBS"
+
+GIT_UNSTASH_FLAGS($ZLIB_PATH)
+
 AC_SUBST(NO_DEFLATE_BOUND)
+
 #
 # Define NEEDS_SOCKET if linking with libc is not enough (SunOS,
 # Patrick Mauritz).
@@ -273,6 +474,21 @@ AC_CHECK_LIB([c], [socket],
 AC_SUBST(NEEDS_SOCKET)
 test -n "$NEEDS_SOCKET" && LIBS="$LIBS -lsocket"
 
+#
+# Define NEEDS_RESOLV if linking with -lnsl and/or -lsocket is not enough.
+# Notably on Solaris hstrerror resides in libresolv and on Solaris 7
+# inet_ntop and inet_pton additionally reside there.
+AC_CHECK_LIB([c], [hstrerror],
+[NEEDS_RESOLV=],
+[NEEDS_RESOLV=YesPlease])
+AC_SUBST(NEEDS_RESOLV)
+test -n "$NEEDS_RESOLV" && LIBS="$LIBS -lresolv"
+
+AC_CHECK_LIB([c], [basename],
+[NEEDS_LIBGEN=],
+[NEEDS_LIBGEN=YesPlease])
+AC_SUBST(NEEDS_LIBGEN)
+test -n "$NEEDS_LIBGEN" && LIBS="$LIBS -lgen"
 
 ## Checks for header files.
 AC_MSG_NOTICE([CHECKS for header files])
@@ -297,13 +513,18 @@ int main(void)
 	return 0;
 }
 ]])
+
+GIT_STASH_FLAGS($ICONVDIR)
+
 AC_MSG_CHECKING([for old iconv()])
 AC_COMPILE_IFELSE(OLDICONVTEST_SRC,
 	[AC_MSG_RESULT([no])],
 	[AC_MSG_RESULT([yes])
 	OLD_ICONV=UnfortunatelyYes])
-AC_SUBST(OLD_ICONV)
 
+GIT_UNSTASH_FLAGS($ICONVDIR)
+
+AC_SUBST(OLD_ICONV)
 
 ## Checks for typedefs, structures, and compiler characteristics.
 AC_MSG_NOTICE([CHECKS for typedefs, structures, and compiler characteristics])
@@ -428,6 +649,12 @@ AC_SUBST(SNPRINTF_RETURNS_BOGUS)
 ## (in default C library and libraries checked by AC_CHECK_LIB)
 AC_MSG_NOTICE([CHECKS for library functions])
 #
+# Define NO_LIBGEN_H if you don't have libgen.h.
+AC_CHECK_HEADER([libgen.h],
+[NO_LIBGEN_H=],
+[NO_LIBGEN_H=YesPlease])
+AC_SUBST(NO_LIBGEN_H)
+#
 # Define NO_STRCASESTR if you don't have strcasestr.
 GIT_CHECK_FUNC(strcasestr,
 [NO_STRCASESTR=],
@@ -478,6 +705,13 @@ GIT_CHECK_FUNC(mkdtemp,
 [NO_MKDTEMP=YesPlease])
 AC_SUBST(NO_MKDTEMP)
 #
+# Define NO_MKSTEMPS if you don't have mkstemps in the C library.
+GIT_CHECK_FUNC(mkstemps,
+[NO_MKSTEMPS=],
+[NO_MKSTEMPS=YesPlease])
+AC_SUBST(NO_MKSTEMPS)
+#
+#
 # Define NO_MMAP if you want to avoid mmap.
 #
 # Define NO_ICONV if your libc does not properly support iconv.
@@ -492,111 +726,66 @@ AC_SUBST(NO_MKDTEMP)
 #
 # Define NO_PTHREADS if we do not have pthreads
 #
-# Define PTHREAD_LIBS to the linker flag used for Pthread support.
-AC_LANG_CONFTEST([AC_LANG_PROGRAM(
-  [[#include <pthread.h>]],
-  [[pthread_mutex_t test_mutex;]]
-)])
-${CC} -pthread conftest.c -o conftest.o > /dev/null 2>&1
-if test $? -eq 0;then
- PTHREAD_LIBS="-pthread"
+# Define PTHREAD_LIBS to the linker flag used for Pthread support and define
+# THREADED_DELTA_SEARCH if Pthreads are available.
+AC_DEFUN([PTHREADTEST_SRC], [
+#include <pthread.h>
+
+int main(void)
+{
+	pthread_mutex_t test_mutex;
+	return (0);
+}
+])
+
+dnl AC_LANG_CONFTEST([AC_LANG_PROGRAM(
+dnl   [[#include <pthread.h>]],
+dnl   [[pthread_mutex_t test_mutex;]]
+dnl )])
+
+NO_PTHREADS=UnfortunatelyYes
+THREADED_DELTA_SEARCH=
+PTHREAD_LIBS=
+
+if test -n "$USER_NOPTHREAD"; then
+   AC_MSG_NOTICE([Skipping POSIX Threads at user request.])
+# handle these separately since PTHREAD_CFLAGS could be '-lpthreads
+# -D_REENTRANT' or some such.
+elif test -z "$PTHREAD_CFLAGS"; then
+  for opt in -pthread -lpthread; do
+     old_CFLAGS="$CFLAGS"
+     CFLAGS="$opt $CFLAGS"
+     AC_MSG_CHECKING([Checking for POSIX Threads with '$opt'])
+     AC_LINK_IFELSE(PTHREADTEST_SRC,
+	[AC_MSG_RESULT([yes])
+		NO_PTHREADS=
+		PTHREAD_LIBS="$opt"
+		THREADED_DELTA_SEARCH=YesPlease
+		break
+	],
+	[AC_MSG_RESULT([no])])
+      CFLAGS="$old_CFLAGS"
+  done
 else
- ${CC} -lpthread conftest.c -o conftest.o > /dev/null 2>&1
- if test $? -eq 0;then
-  PTHREAD_LIBS="-lpthread"
- else
-  NO_PTHREADS=UnfortunatelyYes
- fi
+  old_CFLAGS="$CFLAGS"
+  CFLAGS="$PTHREAD_CFLAGS $CFLAGS"
+  AC_MSG_CHECKING([Checking for POSIX Threads with '$PTHREAD_CFLAGS'])
+  AC_LINK_IFELSE(PTHREADTEST_SRC,
+	[AC_MSG_RESULT([yes])
+		NO_PTHREADS=
+		PTHREAD_LIBS="$PTHREAD_CFLAGS"
+		THREADED_DELTA_SEARCH=YesPlease
+	],
+	[AC_MSG_RESULT([no])])
+
+  CFLAGS="$old_CFLAGS"
 fi
+
+CFLAGS="$old_CFLAGS"
+
 AC_SUBST(PTHREAD_LIBS)
 AC_SUBST(NO_PTHREADS)
-
-## Site configuration (override autodetection)
-## --with-PACKAGE[=ARG] and --without-PACKAGE
-AC_MSG_NOTICE([CHECKS for site configuration])
-#
-# Define NO_SVN_TESTS if you want to skip time-consuming SVN interoperability
-# tests.  These tests take up a significant amount of the total test time
-# but are not needed unless you plan to talk to SVN repos.
-#
-# Define MOZILLA_SHA1 environment variable when running make to make use of
-# a bundled SHA1 routine coming from Mozilla. It is GPL'd and should be fast
-# on non-x86 architectures (e.g. PowerPC), while the OpenSSL version (default
-# choice) has very fast version optimized for i586.
-#
-# Define PPC_SHA1 environment variable when running make to make use of
-# a bundled SHA1 routine optimized for PowerPC.
-#
-# Define ARM_SHA1 environment variable when running make to make use of
-# a bundled SHA1 routine optimized for ARM.
-#
-# Define NO_OPENSSL environment variable if you do not have OpenSSL.
-# This also implies MOZILLA_SHA1.
-#
-# Define OPENSSLDIR=/foo/bar if your openssl header and library files are in
-# /foo/bar/include and /foo/bar/lib directories.
-AC_ARG_WITH(openssl,
-AS_HELP_STRING([--with-openssl],[use OpenSSL library (default is YES)])
-AS_HELP_STRING([],              [ARG can be prefix for openssl library and headers]),\
-GIT_PARSE_WITH(openssl))
-#
-# Define NO_CURL if you do not have curl installed.  git-http-pull and
-# git-http-push are not built, and you cannot use http:// and https://
-# transports.
-#
-# Define CURLDIR=/foo/bar if your curl header and library files are in
-# /foo/bar/include and /foo/bar/lib directories.
-AC_ARG_WITH(curl,
-AS_HELP_STRING([--with-curl],[support http(s):// transports (default is YES)])
-AS_HELP_STRING([],           [ARG can be also prefix for curl library and headers]),
-GIT_PARSE_WITH(curl))
-#
-# Define NO_EXPAT if you do not have expat installed.  git-http-push is
-# not built, and you cannot push using http:// and https:// transports.
-#
-# Define EXPATDIR=/foo/bar if your expat header and library files are in
-# /foo/bar/include and /foo/bar/lib directories.
-AC_ARG_WITH(expat,
-AS_HELP_STRING([--with-expat],
-[support git-push using http:// and https:// transports via WebDAV (default is YES)])
-AS_HELP_STRING([],            [ARG can be also prefix for expat library and headers]),
-GIT_PARSE_WITH(expat))
-#
-# Define NO_FINK if you are building on Darwin/Mac OS X, have Fink
-# installed in /sw, but don't want GIT to link against any libraries
-# installed there.  If defined you may specify your own (or Fink's)
-# include directories and library directories by defining CFLAGS
-# and LDFLAGS appropriately.
-#
-# Define NO_DARWIN_PORTS if you are building on Darwin/Mac OS X,
-# have DarwinPorts installed in /opt/local, but don't want GIT to
-# link against any libraries installed there.  If defined you may
-# specify your own (or DarwinPort's) include directories and
-# library directories by defining CFLAGS and LDFLAGS appropriately.
-#
-# Define NO_MMAP if you want to avoid mmap.
-#
-# Define NO_ICONV if your libc does not properly support iconv.
-AC_ARG_WITH(iconv,
-AS_HELP_STRING([--without-iconv],
-[if your architecture doesn't properly support iconv])
-AS_HELP_STRING([--with-iconv=PATH],
-[PATH is prefix for libiconv library and headers])
-AS_HELP_STRING([],
-[used only if you need linking with libiconv]),
-GIT_PARSE_WITH(iconv))
-
-## --enable-FEATURE[=ARG] and --disable-FEATURE
-#
-# Define USE_NSEC below if you want git to care about sub-second file mtimes
-# and ctimes. Note that you need recent glibc (at least 2.2.4) for this, and
-# it will BREAK YOUR LOCAL DIFFS! show-diff and anything using it will likely
-# randomly break unless your underlying filesystem supports those sub-second
-# times (my ext3 doesn't).
-#
-# Define USE_STDEV below if you want git to care about the underlying device
-# change being considered an inode change from the update-index perspective.
-
+AC_SUBST(THREADED_DELTA_SEARCH)
 
 ## Output files
 AC_CONFIG_FILES(["${config_file}":"${config_in}":"${config_append}"])

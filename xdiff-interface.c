@@ -15,11 +15,10 @@ static int parse_num(char **cp_p, int *num_p)
 {
 	char *cp = *cp_p;
 	int num = 0;
-	int read_some;
 
 	while ('0' <= *cp && *cp <= '9')
 		num = num * 10 + *cp++ - '0';
-	if (!(read_some = cp - *cp_p))
+	if (!(cp - *cp_p))
 		return -1;
 	*cp_p = cp;
 	*num_p = num;
@@ -307,6 +306,21 @@ void xdiff_set_find_func(xdemitconf_t *xecfg, const char *value, int cflags)
 			die("Invalid regexp to look for hunk header: %s", expression);
 		free(buffer);
 		value = ep + 1;
+	}
+}
+
+void xdiff_clear_find_func(xdemitconf_t *xecfg)
+{
+	if (xecfg->find_func) {
+		int i;
+		struct ff_regs *regs = xecfg->find_func_priv;
+
+		for (i = 0; i < regs->nr; i++)
+			regfree(&regs->array[i].re);
+		free(regs->array);
+		free(regs);
+		xecfg->find_func = NULL;
+		xecfg->find_func_priv = NULL;
 	}
 }
 

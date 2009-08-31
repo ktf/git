@@ -36,6 +36,7 @@ struct rev_info {
 	unsigned int	dense:1,
 			prune:1,
 			no_merges:1,
+			merges_only:1,
 			no_walk:1,
 			show_all:1,
 			remove_empty_trees:1,
@@ -49,7 +50,7 @@ struct rev_info {
 			blob_objects:1,
 			edge_hint:1,
 			limited:1,
-			unpacked:1, /* see also ignore_packed below */
+			unpacked:1,
 			boundary:2,
 			left_right:1,
 			rewrite_parents:1,
@@ -80,16 +81,15 @@ struct rev_info {
 			missing_newline:1;
 	enum date_mode date_mode;
 
-	const char **ignore_packed; /* pretend objects in these are unpacked */
-	int num_ignore_packed;
-
 	unsigned int	abbrev;
 	enum cmit_fmt	commit_format;
 	struct log_info *loginfo;
 	int		nr, total;
 	const char	*mime_boundary;
+	const char	*patch_suffix;
+	int		numbered_files;
 	char		*message_id;
-	const char	*ref_message_id;
+	struct string_list *ref_message_ids;
 	const char	*add_signoff;
 	const char	*extra_headers;
 	const char	*log_reencode;
@@ -119,8 +119,9 @@ struct rev_info {
 };
 
 #define REV_TREE_SAME		0
-#define REV_TREE_NEW		1
-#define REV_TREE_DIFFERENT	2
+#define REV_TREE_NEW		1	/* Only new files */
+#define REV_TREE_OLD		2	/* Only files removed */
+#define REV_TREE_DIFFERENT	3	/* Mixed changes */
 
 /* revision.c */
 void read_revisions_from_stdin(struct rev_info *revs);
@@ -146,6 +147,8 @@ struct name_path {
 	int elem_len;
 	const char *elem;
 };
+
+char *path_name(const struct name_path *path, const char *name);
 
 extern void add_object(struct object *obj,
 		       struct object_array *p,

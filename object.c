@@ -45,13 +45,14 @@ int type_from_string(const char *str)
 
 static unsigned int hash_obj(struct object *obj, unsigned int n)
 {
-	unsigned int hash = *(unsigned int *)obj->sha1;
+	unsigned int hash;
+	memcpy(&hash, obj->sha1, sizeof(unsigned int));
 	return hash % n;
 }
 
 static void insert_obj_hash(struct object *obj, struct object **hash, unsigned int size)
 {
-	int j = hash_obj(obj, size);
+	unsigned int j = hash_obj(obj, size);
 
 	while (hash[j]) {
 		j++;
@@ -61,16 +62,16 @@ static void insert_obj_hash(struct object *obj, struct object **hash, unsigned i
 	hash[j] = obj;
 }
 
-static int hashtable_index(const unsigned char *sha1)
+static unsigned int hashtable_index(const unsigned char *sha1)
 {
 	unsigned int i;
 	memcpy(&i, sha1, sizeof(unsigned int));
-	return (int)(i % obj_hash_size);
+	return i % obj_hash_size;
 }
 
 struct object *lookup_object(const unsigned char *sha1)
 {
-	int i;
+	unsigned int i;
 	struct object *obj;
 
 	if (!obj_hash)
@@ -267,4 +268,23 @@ void add_object_array_with_mode(struct object *obj, const char *name, struct obj
 	objects[nr].name = name;
 	objects[nr].mode = mode;
 	array->nr = ++nr;
+}
+
+void object_array_remove_duplicates(struct object_array *array)
+{
+	int ref, src, dst;
+	struct object_array_entry *objects = array->objects;
+
+	for (ref = 0; ref < array->nr - 1; ref++) {
+		for (src = ref + 1, dst = src;
+		     src < array->nr;
+		     src++) {
+			if (!strcmp(objects[ref].name, objects[src].name))
+				continue;
+			if (src != dst)
+				objects[dst] = objects[src];
+			dst++;
+		}
+		array->nr = dst;
+	}
 }

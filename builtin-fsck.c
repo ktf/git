@@ -10,6 +10,7 @@
 #include "tree-walk.h"
 #include "fsck.h"
 #include "parse-options.h"
+#include "dir.h"
 
 #define REACHABLE 0x0001
 #define SEEN      0x0002
@@ -22,6 +23,7 @@ static int check_full;
 static int check_strict;
 static int keep_cache_objects;
 static unsigned char head_sha1[20];
+static const char *head_points_at;
 static int errors_found;
 static int write_lost_and_found;
 static int verbose;
@@ -102,7 +104,7 @@ static int mark_object(struct object *obj, int type, void *data)
 
 static void mark_object_reachable(struct object *obj)
 {
-	mark_object(obj, OBJ_ANY, 0);
+	mark_object(obj, OBJ_ANY, NULL);
 }
 
 static int traverse_one_object(struct object *obj, struct object *parent)
@@ -158,7 +160,7 @@ static void check_reachable_object(struct object *obj)
 	 * do a full fsck
 	 */
 	if (!obj->parsed) {
-		if (has_sha1_pack(obj->sha1, NULL))
+		if (has_sha1_pack(obj->sha1))
 			return; /* it is in pack - forget about it */
 		printf("missing %s %s\n", typename(obj->type), sha1_to_hex(obj->sha1));
 		errors_found |= ERROR_REACHABLE;
@@ -215,7 +217,7 @@ static void check_unreachable_object(struct object *obj)
 				return;
 			}
 			if (!(f = fopen(filename, "w")))
-				die("Could not open %s", filename);
+				die_errno("Could not open '%s'", filename);
 			if (obj->type == OBJ_BLOB) {
 				enum object_type type;
 				unsigned long size;
@@ -223,15 +225,15 @@ static void check_unreachable_object(struct object *obj)
 						&type, &size);
 				if (buf) {
 					if (fwrite(buf, size, 1, f) != 1)
-						die("Could not write %s: %s",
-						    filename, strerror(errno));
+						die_errno("Could not write '%s'",
+							  filename);
 					free(buf);
 				}
 			} else
 				fprintf(f, "%s\n", sha1_to_hex(obj->sha1));
 			if (fclose(f))
-				die("Could not finish %s: %s",
-				    filename, strerror(errno));
+				die_errno("Could not finish '%s'",
+					  filename);
 		}
 		return;
 	}
@@ -290,7 +292,7 @@ static int fsck_sha1(const unsigned char *sha1)
 		fprintf(stderr, "Checking %s %s\n",
 			typename(obj->type), sha1_to_hex(obj->sha1));
 
-	if (fsck_walk(obj, mark_used, 0))
+	if (fsck_walk(obj, mark_used, NULL))
 		objerror(obj, "broken links");
 	if (fsck_object(obj, check_strict, fsck_error_func))
 		return -1;
@@ -395,19 +397,12 @@ static void fsck_dir(int i, char *path)
 	while ((de = readdir(dir)) != NULL) {
 		char name[100];
 		unsigned char sha1[20];
-		int len = strlen(de->d_name);
 
-		switch (len) {
-		case 2:
-			if (de->d_name[1] != '.')
-				break;
-		case 1:
-			if (de->d_name[0] != '.')
-				break;
+		if (is_dot_or_dotdot(de->d_name))
 			continue;
-		case 38:
+		if (strlen(de->d_name) == 38) {
 			sprintf(name, "%02x", i);
-			memcpy(name+2, de->d_name, len+1);
+			memcpy(name+2, de->d_name, 39);
 			if (get_sha1_hex(name, sha1) < 0)
 				break;
 			add_sha1_list(sha1, DIRENT_SORT_HINT(de));
@@ -479,6 +474,8 @@ static int fsck_handle_ref(const char *refname, const unsigned char *sha1, int f
 
 static void get_default_heads(void)
 {
+	if (head_points_at && !is_null_sha1(head_sha1))
+		fsck_handle_ref("HEAD", head_sha1, 0, NULL);
 	for_each_ref(fsck_handle_ref, NULL);
 	if (include_reflogs)
 		for_each_reflog(fsck_handle_reflog, NULL);
@@ -518,14 +515,13 @@ static void fsck_object_dir(const char *path)
 
 static int fsck_head_link(void)
 {
-	unsigned char sha1[20];
 	int flag;
 	int null_is_error = 0;
-	const char *head_points_at = resolve_ref("HEAD", sha1, 0, &flag);
 
 	if (verbose)
 		fprintf(stderr, "Checking HEAD link\n");
 
+	head_points_at = resolve_ref("HEAD", head_sha1, 0, &flag);
 	if (!head_points_at)
 		return error("Invalid HEAD");
 	if (!strcmp(head_points_at, "HEAD"))
@@ -534,7 +530,7 @@ static int fsck_head_link(void)
 	else if (prefixcmp(head_points_at, "refs/heads/"))
 		return error("HEAD points to something strange (%s)",
 			     head_points_at);
-	if (is_null_sha1(sha1)) {
+	if (is_null_sha1(head_sha1)) {
 		if (null_is_error)
 			return error("HEAD: detached HEAD points at nothing");
 		fprintf(stderr, "notice: HEAD points to an unborn branch (%s)\n",
@@ -590,10 +586,11 @@ static struct option fsck_opts[] = {
 int cmd_fsck(int argc, const char **argv, const char *prefix)
 {
 	int i, heads;
+	struct alternate_object_database *alt;
 
 	errors_found = 0;
 
-	argc = parse_options(argc, argv, fsck_opts, fsck_usage, 0);
+	argc = parse_options(argc, argv, prefix, fsck_opts, fsck_usage, 0);
 	if (write_lost_and_found) {
 		check_full = 1;
 		include_reflogs = 0;
@@ -601,17 +598,19 @@ int cmd_fsck(int argc, const char **argv, const char *prefix)
 
 	fsck_head_link();
 	fsck_object_dir(get_object_directory());
+
+	prepare_alt_odb();
+	for (alt = alt_odb_list; alt; alt = alt->next) {
+		char namebuf[PATH_MAX];
+		int namelen = alt->name - alt->base;
+		memcpy(namebuf, alt->base, namelen);
+		namebuf[namelen - 1] = 0;
+		fsck_object_dir(namebuf);
+	}
+
 	if (check_full) {
-		struct alternate_object_database *alt;
 		struct packed_git *p;
-		prepare_alt_odb();
-		for (alt = alt_odb_list; alt; alt = alt->next) {
-			char namebuf[PATH_MAX];
-			int namelen = alt->name - alt->base;
-			memcpy(namebuf, alt->base, namelen);
-			namebuf[namelen - 1] = 0;
-			fsck_object_dir(namebuf);
-		}
+
 		prepare_packed_git();
 		for (p = packed_git; p; p = p->next)
 			/* verify gives error messages itself */
@@ -628,10 +627,11 @@ int cmd_fsck(int argc, const char **argv, const char *prefix)
 	}
 
 	heads = 0;
-	for (i = 1; i < argc; i++) {
+	for (i = 0; i < argc; i++) {
 		const char *arg = argv[i];
-		if (!get_sha1(arg, head_sha1)) {
-			struct object *obj = lookup_object(head_sha1);
+		unsigned char sha1[20];
+		if (!get_sha1(arg, sha1)) {
+			struct object *obj = lookup_object(sha1);
 
 			/* Error is printed by lookup_object(). */
 			if (!obj)

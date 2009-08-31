@@ -6,6 +6,7 @@
 #include "quote.h"
 #include "xdiff-interface.h"
 #include "log-tree.h"
+#include "refs.h"
 
 static struct combine_diff_path *intersect_paths(struct combine_diff_path *curr, int n, int num_parent)
 {
@@ -23,7 +24,7 @@ static struct combine_diff_path *intersect_paths(struct combine_diff_path *curr,
 			path = q->queue[i]->two->path;
 			len = strlen(path);
 			p = xmalloc(combine_diff_path_size(num_parent, len));
-			p->path = (char*) &(p->parent[num_parent]);
+			p->path = (char *) &(p->parent[num_parent]);
 			memcpy(p->path, path, len);
 			p->path[len] = 0;
 			p->len = len;
@@ -79,6 +80,7 @@ struct lline {
 /* Lines surviving in the merge result */
 struct sline {
 	struct lline *lost_head, **lost_tail;
+	struct lline *next_lost;
 	char *bol;
 	int len;
 	/* bit 0 up to (N-1) are on if the parent has this line (i.e.
@@ -90,18 +92,24 @@ struct sline {
 	unsigned long *p_lno;
 };
 
-static char *grab_blob(const unsigned char *sha1, unsigned long *size)
+static char *grab_blob(const unsigned char *sha1, unsigned int mode, unsigned long *size)
 {
 	char *blob;
 	enum object_type type;
-	if (is_null_sha1(sha1)) {
+
+	if (S_ISGITLINK(mode)) {
+		blob = xmalloc(100);
+		*size = snprintf(blob, 100,
+				 "Subproject commit %s\n", sha1_to_hex(sha1));
+	} else if (is_null_sha1(sha1)) {
 		/* deleted blob */
 		*size = 0;
 		return xcalloc(1, 1);
+	} else {
+		blob = read_sha1_file(sha1, &type, size);
+		if (type != OBJ_BLOB)
+			die("object '%s' is not a blob!", sha1_to_hex(sha1));
 	}
-	blob = read_sha1_file(sha1, &type, size);
-	if (type != OBJ_BLOB)
-		die("object '%s' is not a blob!", sha1_to_hex(sha1));
 	return blob;
 }
 
@@ -114,18 +122,12 @@ static void append_lost(struct sline *sline, int n, const char *line, int len)
 
 	/* Check to see if we can squash things */
 	if (sline->lost_head) {
-		struct lline *last_one = NULL;
-		/* We cannot squash it with earlier one */
-		for (lline = sline->lost_head;
-		     lline;
-		     lline = lline->next)
-			if (lline->parent_map & this_mask)
-				last_one = lline;
-		lline = last_one ? last_one->next : sline->lost_head;
+		lline = sline->next_lost;
 		while (lline) {
 			if (lline->len == len &&
 			    !memcmp(lline->line, line, len)) {
 				lline->parent_map |= this_mask;
+				sline->next_lost = lline->next;
 				return;
 			}
 			lline = lline->next;
@@ -140,6 +142,7 @@ static void append_lost(struct sline *sline, int n, const char *line, int len)
 	lline->line[len] = 0;
 	*sline->lost_tail = lline;
 	sline->lost_tail = &lline->next;
+	sline->next_lost = NULL;
 }
 
 struct combine_diff_state {
@@ -161,25 +164,28 @@ static void consume_line(void *state_, char *line, unsigned long len)
 				      &state->nb, &state->nn))
 			return;
 		state->lno = state->nb;
-		if (!state->nb)
-			/* @@ -1,2 +0,0 @@ to remove the
-			 * first two lines...
-			 */
-			state->nb = 1;
-		if (state->nn == 0)
+		if (state->nn == 0) {
 			/* @@ -X,Y +N,0 @@ removed Y lines
 			 * that would have come *after* line N
 			 * in the result.  Our lost buckets hang
 			 * to the line after the removed lines,
+			 *
+			 * Note that this is correct even when N == 0,
+			 * in which case the hunk removes the first
+			 * line in the file.
 			 */
 			state->lost_bucket = &state->sline[state->nb];
-		else
+			if (!state->nb)
+				state->nb = 1;
+		} else {
 			state->lost_bucket = &state->sline[state->nb-1];
+		}
 		if (!state->sline[state->nb-1].p_lno)
 			state->sline[state->nb-1].p_lno =
 				xcalloc(state->num_parent,
 					sizeof(unsigned long));
 		state->sline[state->nb-1].p_lno[state->n] = state->ob;
+		state->lost_bucket->next_lost = state->lost_bucket->lost_head;
 		return;
 	}
 	if (!state->lost_bucket)
@@ -195,7 +201,8 @@ static void consume_line(void *state_, char *line, unsigned long len)
 	}
 }
 
-static void combine_diff(const unsigned char *parent, mmfile_t *result_file,
+static void combine_diff(const unsigned char *parent, unsigned int mode,
+			 mmfile_t *result_file,
 			 struct sline *sline, unsigned int cnt, int n,
 			 int num_parent)
 {
@@ -211,7 +218,7 @@ static void combine_diff(const unsigned char *parent, mmfile_t *result_file,
 	if (!cnt)
 		return; /* result deleted */
 
-	parent_file.ptr = grab_blob(parent, &sz);
+	parent_file.ptr = grab_blob(parent, mode, &sz);
 	parent_file.size = sz;
 	memset(&xpp, 0, sizeof(xpp));
 	xpp.flags = XDF_NEED_MINIMAL;
@@ -526,7 +533,6 @@ static void dump_sline(struct sline *sline, unsigned long cnt, int num_parent,
 		return; /* result deleted */
 
 	while (1) {
-		struct sline *sl = &sline[lno];
 		unsigned long hunk_end;
 		unsigned long rlines;
 		const char *hunk_comment = NULL;
@@ -592,7 +598,7 @@ static void dump_sline(struct sline *sline, unsigned long cnt, int num_parent,
 			struct lline *ll;
 			int j;
 			unsigned long p_mask;
-			sl = &sline[lno++];
+			struct sline *sl = &sline[lno++];
 			ll = (sl->flag & no_pre_delete) ? NULL : sl->lost_head;
 			while (ll) {
 				fputs(c_old, stdout);
@@ -693,7 +699,7 @@ static void show_patch_diff(struct combine_diff_path *elem, int num_parent,
 
 	/* Read the result of merge first */
 	if (!working_tree_file)
-		result = grab_blob(elem->sha1, &result_size);
+		result = grab_blob(elem->sha1, elem->mode, &result_size);
 	else {
 		/* Used by diff-tree to read from the working tree */
 		struct stat st;
@@ -713,9 +719,13 @@ static void show_patch_diff(struct combine_diff_path *elem, int num_parent,
 			result_size = buf.len;
 			result = strbuf_detach(&buf, NULL);
 			elem->mode = canon_mode(st.st_mode);
-		}
-		else if (0 <= (fd = open(elem->path, O_RDONLY)) &&
-			 !fstat(fd, &st)) {
+		} else if (S_ISDIR(st.st_mode)) {
+			unsigned char sha1[20];
+			if (resolve_gitlink_ref(elem->path, "HEAD", sha1) < 0)
+				result = grab_blob(elem->sha1, elem->mode, &result_size);
+			else
+				result = grab_blob(sha1, elem->mode, &result_size);
+		} else if (0 <= (fd = open(elem->path, O_RDONLY))) {
 			size_t len = xsize_t(st.st_size);
 			ssize_t done;
 			int is_file, i;
@@ -735,7 +745,7 @@ static void show_patch_diff(struct combine_diff_path *elem, int num_parent,
 
 			done = read_in_full(fd, result, len);
 			if (done < 0)
-				die("read error '%s'", elem->path);
+				die_errno("read error '%s'", elem->path);
 			else if (done < len)
 				die("early EOF '%s'", elem->path);
 
@@ -807,7 +817,9 @@ static void show_patch_diff(struct combine_diff_path *elem, int num_parent,
 			}
 		}
 		if (i <= j)
-			combine_diff(elem->parent[i].sha1, &result_file, sline,
+			combine_diff(elem->parent[i].sha1,
+				     elem->parent[i].mode,
+				     &result_file, sline,
 				     cnt, i, num_parent);
 		if (elem->parent[i].mode != elem->mode)
 			mode_differs = 1;
@@ -1050,7 +1062,7 @@ void diff_tree_combined_merge(const unsigned char *sha1,
 	for (parents = commit->parents, num_parent = 0;
 	     parents;
 	     parents = parents->next, num_parent++)
-		hashcpy((unsigned char*)(parent + num_parent),
+		hashcpy((unsigned char *)(parent + num_parent),
 			parents->item->object.sha1);
 	diff_tree_combined(sha1, parent, num_parent, dense, rev);
 }

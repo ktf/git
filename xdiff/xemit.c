@@ -59,9 +59,10 @@ static int xdl_emit_record(xdfile_t *xdf, long ri, char const *pre, xdemitcb_t *
  */
 xdchange_t *xdl_get_hunk(xdchange_t *xscr, xdemitconf_t const *xecfg) {
 	xdchange_t *xch, *xchp;
+	long max_common = 2 * xecfg->ctxlen + xecfg->interhunkctxlen;
 
 	for (xchp = xscr, xch = xscr->next; xch; xchp = xch, xch = xch->next)
-		if (xch->i1 - (xchp->i1 + xchp->chg1) > 2 * xecfg->ctxlen)
+		if (xch->i1 - (xchp->i1 + xchp->chg1) > max_common)
 			break;
 
 	return xchp;
@@ -131,7 +132,7 @@ int xdl_emit_diff(xdfenv_t *xe, xdchange_t *xscr, xdemitcb_t *ecb,
 	if (xecfg->flags & XDL_EMIT_COMMON)
 		return xdl_emit_common(xe, xscr, ecb, xecfg);
 
-	for (xch = xche = xscr; xch; xch = xche->next) {
+	for (xch = xscr; xch; xch = xche->next) {
 		xche = xdl_get_hunk(xch, xecfg);
 
 		s1 = XDL_MAX(xch->i1 - xecfg->ctxlen, 0);

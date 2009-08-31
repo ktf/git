@@ -23,7 +23,7 @@ static int chomp_prefix;
 static const char *ls_tree_prefix;
 
 static const char ls_tree_usage[] =
-	"git ls-tree [-d] [-r] [-t] [-l] [-z] [--name-only] [--name-status] [--full-name] [--abbrev[=<n>]] <tree-ish> [path...]";
+	"git ls-tree [-d] [-r] [-t] [-l] [-z] [--name-only] [--name-status] [--full-name] [--full-tree] [--abbrev[=<n>]] <tree-ish> [path...]";
 
 static int show_recursive(const char *base, int baselen, const char *pathname)
 {
@@ -60,7 +60,6 @@ static int show_tree(const unsigned char *sha1, const char *base, int baselen,
 {
 	int retval = 0;
 	const char *type = blob_type;
-	unsigned long size;
 
 	if (S_ISGITLINK(mode)) {
 		/*
@@ -68,13 +67,8 @@ static int show_tree(const unsigned char *sha1, const char *base, int baselen,
 		 *
 		 * Something similar to this incomplete example:
 		 *
-		if (show_subprojects(base, baselen, pathname)) {
-			struct child_process ls_tree;
-
-			ls_tree.dir = base;
-			ls_tree.argv = ls-tree;
-			start_command(&ls_tree);
-		}
+		if (show_subprojects(base, baselen, pathname))
+			retval = READ_TREE_RECURSIVE;
 		 *
 		 */
 		type = commit_type;
@@ -95,17 +89,20 @@ static int show_tree(const unsigned char *sha1, const char *base, int baselen,
 
 	if (!(ls_options & LS_NAME_ONLY)) {
 		if (ls_options & LS_SHOW_SIZE) {
+			char size_text[24];
 			if (!strcmp(type, blob_type)) {
-				sha1_object_info(sha1, &size);
-				printf("%06o %s %s %7lu\t", mode, type,
-				       abbrev ? find_unique_abbrev(sha1, abbrev)
-				              : sha1_to_hex(sha1),
-				       size);
+				unsigned long size;
+				if (sha1_object_info(sha1, &size) == OBJ_BAD)
+					strcpy(size_text, "BAD");
+				else
+					snprintf(size_text, sizeof(size_text),
+						 "%lu", size);
 			} else
-				printf("%06o %s %s %7c\t", mode, type,
-				       abbrev ? find_unique_abbrev(sha1, abbrev)
-				              : sha1_to_hex(sha1),
-				       '-');
+				strcpy(size_text, "-");
+			printf("%06o %s %s %7s\t", mode, type,
+			       abbrev ? find_unique_abbrev(sha1, abbrev)
+				      : sha1_to_hex(sha1),
+			       size_text);
 		} else
 			printf("%06o %s %s\t", mode, type,
 			       abbrev ? find_unique_abbrev(sha1, abbrev)
@@ -153,6 +150,11 @@ int cmd_ls_tree(int argc, const char **argv, const char *prefix)
 				break;
 			}
 			if (!strcmp(argv[1]+2, "full-name")) {
+				chomp_prefix = 0;
+				break;
+			}
+			if (!strcmp(argv[1]+2, "full-tree")) {
+				ls_tree_prefix = prefix = NULL;
 				chomp_prefix = 0;
 				break;
 			}

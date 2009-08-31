@@ -11,6 +11,7 @@ git-apply
 git-archimport
 git-archive
 git-bisect
+git-bisect--helper
 git-blame
 git-branch
 git-bundle
@@ -35,6 +36,8 @@ git-diff
 git-diff-files
 git-diff-index
 git-diff-tree
+git-difftool
+git-difftool--helper
 git-describe
 git-fast-export
 git-fast-import
@@ -78,6 +81,7 @@ git-merge-recursive
 git-merge-resolve
 git-merge-subtree
 git-mergetool
+git-mergetool--lib
 git-mktag
 git-mktree
 git-name-rev
@@ -144,6 +148,7 @@ git-core-*/?*
 gitk-wish
 gitweb/gitweb.cgi
 test-chmtime
+test-ctype
 test-date
 test-delta
 test-dump-cache-tree
@@ -152,6 +157,7 @@ test-match-trees
 test-parse-options
 test-path-utils
 test-sha1
+test-sigchain
 common-cmds.h
 *.tar.gz
 *.dsc

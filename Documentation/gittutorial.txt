@@ -308,9 +308,7 @@ alice$ git pull /home/bob/myrepo master
 
 This merges the changes from Bob's "master" branch into Alice's
 current branch.  If Alice has made her own changes in the meantime,
-then she may need to manually fix any conflicts.  (Note that the
-"master" argument in the above command is actually unnecessary, as it
-is the default.)
+then she may need to manually fix any conflicts.
 
 The "pull" command thus performs two operations: it fetches changes
 from a remote branch, then merges them into the current branch.
@@ -334,11 +332,11 @@ alice$ git log -p HEAD..FETCH_HEAD
 ------------------------------------------------
 
 This operation is safe even if Alice has uncommitted local changes.
-The range notation HEAD..FETCH_HEAD" means "show everything that is reachable
-from the FETCH_HEAD but exclude anything that is reachable from HEAD.
+The range notation "HEAD..FETCH_HEAD" means "show everything that is reachable
+from the FETCH_HEAD but exclude anything that is reachable from HEAD".
 Alice already knows everything that leads to her current state (HEAD),
-and reviewing what Bob has in his state (FETCH_HEAD) that she has not
-seen with this command
+and reviews what Bob has in his state (FETCH_HEAD) that she has not
+seen with this command.
 
 If Alice wants to visualize what Bob did since their histories forked
 she can issue the following command:
@@ -377,9 +375,9 @@ it easier:
 alice$ git remote add bob /home/bob/myrepo
 ------------------------------------------------
 
-With this, Alice can perform the first part of the "pull" operation alone using the
-'git-fetch' command without merging them with her own branch,
-using:
+With this, Alice can perform the first part of the "pull" operation
+alone using the 'git-fetch' command without merging them with her own
+branch, using:
 
 -------------------------------------
 alice$ git fetch bob
@@ -568,29 +566,29 @@ $ git log v2.5.. Makefile       # commits since v2.5 which modify
 
 You can also give 'git-log' a "range" of commits where the first is not
 necessarily an ancestor of the second; for example, if the tips of
-the branches "stable-release" and "master" diverged from a common
+the branches "stable" and "master" diverged from a common
 commit some time ago, then
 
 -------------------------------------
-$ git log stable..experimental
+$ git log stable..master
 -------------------------------------
 
-will list commits made in the experimental branch but not in the
+will list commits made in the master branch but not in the
 stable branch, while
 
 -------------------------------------
-$ git log experimental..stable
+$ git log master..stable
 -------------------------------------
 
 will show the list of commits made on the stable branch but not
-the experimental branch.
+the master branch.
 
 The 'git-log' command has a weakness: it must present commits in a
 list.  When the history has lines of development that diverged and
 then merged back together, the order in which 'git-log' presents
 those commits is meaningless.
 
-Most projects with multiple contributors (such as the linux kernel,
+Most projects with multiple contributors (such as the Linux kernel,
 or git itself) have frequent merges, and 'gitk' does a better job of
 visualizing their history.  For example,
 
@@ -642,7 +640,7 @@ digressions that may be interesting at this point are:
 
   * linkgit:git-format-patch[1], linkgit:git-am[1]: These convert
     series of git commits into emailed patches, and vice versa,
-    useful for projects such as the linux kernel which rely heavily
+    useful for projects such as the Linux kernel which rely heavily
     on emailed patches.
 
   * linkgit:git-bisect[1]: When there is a regression in your
@@ -651,6 +649,9 @@ digressions that may be interesting at this point are:
     can help you perform a binary search for that commit.  It is
     smart enough to perform a close-to-optimal search even in the
     case of complex non-linear history with lots of merged branches.
+
+  * linkgit:gitworkflows[7]: Gives an overview of recommended
+    workflows.
 
   * link:everyday.html[Everyday GIT with 20 Commands Or So]
 
@@ -663,6 +664,7 @@ linkgit:gitcvs-migration[7],
 linkgit:gitcore-tutorial[7],
 linkgit:gitglossary[7],
 linkgit:git-help[1],
+linkgit:gitworkflows[7],
 link:everyday.html[Everyday git],
 link:user-manual.html[The Git User's Manual]
 

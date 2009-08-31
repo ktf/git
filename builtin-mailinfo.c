@@ -29,6 +29,9 @@ static struct strbuf **p_hdr_data, **s_hdr_data;
 #define MAX_HDR_PARSED 10
 #define MAX_BOUNDARIES 5
 
+static void cleanup_space(struct strbuf *sb);
+
+
 static void get_sane_name(struct strbuf *out, struct strbuf *name, struct strbuf *email)
 {
 	struct strbuf *src = name;
@@ -109,11 +112,19 @@ static void handle_from(const struct strbuf *from)
 	strbuf_add(&email, at, el);
 	strbuf_remove(&f, at - f.buf, el + (at[el] ? 1 : 0));
 
-	/* The remainder is name.  It could be "John Doe <john.doe@xz>"
-	 * or "john.doe@xz (John Doe)", but we have removed the
-	 * email part, so trim from both ends, possibly removing
-	 * the () pair at the end.
+	/* The remainder is name.  It could be
+	 *
+	 * - "John Doe <john.doe@xz>"			(a), or
+	 * - "john.doe@xz (John Doe)"			(b), or
+	 * - "John (zzz) Doe <john.doe@xz> (Comment)"	(c)
+	 *
+	 * but we have removed the email part, so
+	 *
+	 * - remove extra spaces which could stay after email (case 'c'), and
+	 * - trim from both ends, possibly removing the () pair at the end
+	 *   (cases 'a' and 'b').
 	 */
+	cleanup_space(&f);
 	strbuf_trim(&f);
 	if (f.buf[0] == '(' && f.len && f.buf[f.len - 1] == ')') {
 		strbuf_remove(&f, 0, 1);
@@ -182,8 +193,7 @@ static void handle_content_type(struct strbuf *line)
 		*content_top = boundary;
 		boundary = NULL;
 	}
-	if (slurp_attr(line->buf, "charset=", &charset))
-		strbuf_tolower(&charset);
+	slurp_attr(line->buf, "charset=", &charset);
 
 	if (boundary) {
 		strbuf_release(boundary);
@@ -430,13 +440,6 @@ static struct strbuf *decode_b_segment(const struct strbuf *b_seg)
 			c -= 'a' - 26;
 		else if ('0' <= c && c <= '9')
 			c -= '0' - 52;
-		else if (c == '=') {
-			/* padding is almost like (c == 0), except we do
-			 * not output NUL resulting only from it;
-			 * for now we just trust the data.
-			 */
-			c = 0;
-		}
 		else
 			continue; /* garbage */
 		switch (pos++) {
@@ -477,7 +480,7 @@ static const char *guess_charset(const struct strbuf *line, const char *target_c
 		if (is_utf8(line->buf))
 			return NULL;
 	}
-	return "latin1";
+	return "ISO8859-1";
 }
 
 static void convert_to_utf8(struct strbuf *line, const char *charset)
@@ -490,11 +493,11 @@ static void convert_to_utf8(struct strbuf *line, const char *charset)
 			return;
 	}
 
-	if (!strcmp(metainfo_charset, charset))
+	if (!strcasecmp(metainfo_charset, charset))
 		return;
 	out = reencode_string(line->buf, metainfo_charset, charset);
 	if (!out)
-		die("cannot convert from %s to %s\n",
+		die("cannot convert from %s to %s",
 		    charset, metainfo_charset);
 	strbuf_attach(line, out, strlen(out), strlen(out));
 }
@@ -514,8 +517,25 @@ static int decode_header_bq(struct strbuf *it)
 		rfc2047 = 1;
 
 		if (in != ep) {
-			strbuf_add(&outbuf, in, ep - in);
-			in = ep;
+			/*
+			 * We are about to process an encoded-word
+			 * that begins at ep, but there is something
+			 * before the encoded word.
+			 */
+			char *scan;
+			for (scan = in; scan < ep; scan++)
+				if (!isspace(*scan))
+					break;
+
+			if (scan != ep || in == it->buf) {
+				/*
+				 * We should not lose that "something",
+				 * unless we have just processed an
+				 * encoded-word, and there is only LWS
+				 * before the one we are about to process.
+				 */
+				strbuf_add(&outbuf, in, ep - in);
+			}
 		}
 		/* E.g.
 		 * ep : "=?iso-2022-jp?B?GyR...?= foo"
@@ -529,7 +549,6 @@ static int decode_header_bq(struct strbuf *it)
 		if (cp + 3 - it->buf > it->len)
 			goto decode_header_bq_out;
 		strbuf_add(&charset_q, ep, cp - ep);
-		strbuf_tolower(&charset_q);
 
 		encoding = cp[1];
 		if (!encoding || cp[2] != '?')
@@ -860,6 +879,7 @@ static void handle_info(void)
 			}
 			output_header_lines(fout, "Subject", hdr);
 		} else if (!memcmp(header[i], "From", 4)) {
+			cleanup_space(hdr);
 			handle_from(hdr);
 			fprintf(fout, "Author: %s\n", name.buf);
 			fprintf(fout, "Email: %s\n", email.buf);
@@ -922,7 +942,7 @@ int cmd_mailinfo(int argc, const char **argv, const char *prefix)
 	 */
 	git_config(git_default_config, NULL);
 
-	def_charset = (git_commit_encoding ? git_commit_encoding : "utf-8");
+	def_charset = (git_commit_encoding ? git_commit_encoding : "UTF-8");
 	metainfo_charset = def_charset;
 
 	while (1 < argc && argv[1][0] == '-') {

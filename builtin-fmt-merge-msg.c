@@ -256,8 +256,7 @@ static void shortlog(const char *name, unsigned char *sha1,
 
 int fmt_merge_msg(int merge_summary, struct strbuf *in, struct strbuf *out) {
 	int limit = 20, i = 0, pos = 0;
-	char line[1024];
-	char *p = line, *sep = "";
+	char *sep = "";
 	unsigned char head_sha1[20];
 	const char *current_branch;
 
@@ -271,9 +270,8 @@ int fmt_merge_msg(int merge_summary, struct strbuf *in, struct strbuf *out) {
 	/* get a line */
 	while (pos < in->len) {
 		int len;
-		char *newline;
+		char *newline, *p = in->buf + pos;
 
-		p = in->buf + pos;
 		newline = strchr(p, '\n');
 		len = newline ? newline - p : strlen(p);
 		pos += len + !!newline;
@@ -353,7 +351,7 @@ int cmd_fmt_merge_msg(int argc, const char **argv, const char *prefix)
 	struct option options[] = {
 		OPT_BOOLEAN(0, "log",     &merge_summary, "populate log with the shortlog"),
 		OPT_BOOLEAN(0, "summary", &merge_summary, "alias for --log"),
-		OPT_STRING('F', "file",   &inpath, "file", "file to read from"),
+		OPT_FILENAME('F', "file", &inpath, "file to read from"),
 		OPT_END()
 	};
 
@@ -362,19 +360,19 @@ int cmd_fmt_merge_msg(int argc, const char **argv, const char *prefix)
 	int ret;
 
 	git_config(fmt_merge_msg_config, NULL);
-	argc = parse_options(argc, argv, options, fmt_merge_msg_usage, 0);
+	argc = parse_options(argc, argv, prefix, options, fmt_merge_msg_usage,
+			     0);
 	if (argc > 0)
 		usage_with_options(fmt_merge_msg_usage, options);
 
 	if (inpath && strcmp(inpath, "-")) {
 		in = fopen(inpath, "r");
 		if (!in)
-			die("cannot open %s", inpath);
+			die_errno("cannot open '%s'", inpath);
 	}
 
 	if (strbuf_read(&input, fileno(in), 0) < 0)
-		die("could not read input file %s", strerror(errno));
-
+		die_errno("could not read input file");
 	ret = fmt_merge_msg(merge_summary, &input, &output);
 	if (ret)
 		return ret;

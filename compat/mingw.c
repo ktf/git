@@ -1,8 +1,122 @@
 #include "../git-compat-util.h"
 #include "win32.h"
+#include <conio.h>
 #include "../strbuf.h"
 
 unsigned int _CRT_fmode = _O_BINARY;
+
+static int err_win_to_posix(DWORD winerr)
+{
+	int error = ENOSYS;
+	switch(winerr) {
+	case ERROR_ACCESS_DENIED: error = EACCES; break;
+	case ERROR_ACCOUNT_DISABLED: error = EACCES; break;
+	case ERROR_ACCOUNT_RESTRICTION: error = EACCES; break;
+	case ERROR_ALREADY_ASSIGNED: error = EBUSY; break;
+	case ERROR_ALREADY_EXISTS: error = EEXIST; break;
+	case ERROR_ARITHMETIC_OVERFLOW: error = ERANGE; break;
+	case ERROR_BAD_COMMAND: error = EIO; break;
+	case ERROR_BAD_DEVICE: error = ENODEV; break;
+	case ERROR_BAD_DRIVER_LEVEL: error = ENXIO; break;
+	case ERROR_BAD_EXE_FORMAT: error = ENOEXEC; break;
+	case ERROR_BAD_FORMAT: error = ENOEXEC; break;
+	case ERROR_BAD_LENGTH: error = EINVAL; break;
+	case ERROR_BAD_PATHNAME: error = ENOENT; break;
+	case ERROR_BAD_PIPE: error = EPIPE; break;
+	case ERROR_BAD_UNIT: error = ENODEV; break;
+	case ERROR_BAD_USERNAME: error = EINVAL; break;
+	case ERROR_BROKEN_PIPE: error = EPIPE; break;
+	case ERROR_BUFFER_OVERFLOW: error = ENAMETOOLONG; break;
+	case ERROR_BUSY: error = EBUSY; break;
+	case ERROR_BUSY_DRIVE: error = EBUSY; break;
+	case ERROR_CALL_NOT_IMPLEMENTED: error = ENOSYS; break;
+	case ERROR_CANNOT_MAKE: error = EACCES; break;
+	case ERROR_CANTOPEN: error = EIO; break;
+	case ERROR_CANTREAD: error = EIO; break;
+	case ERROR_CANTWRITE: error = EIO; break;
+	case ERROR_CRC: error = EIO; break;
+	case ERROR_CURRENT_DIRECTORY: error = EACCES; break;
+	case ERROR_DEVICE_IN_USE: error = EBUSY; break;
+	case ERROR_DEV_NOT_EXIST: error = ENODEV; break;
+	case ERROR_DIRECTORY: error = EINVAL; break;
+	case ERROR_DIR_NOT_EMPTY: error = ENOTEMPTY; break;
+	case ERROR_DISK_CHANGE: error = EIO; break;
+	case ERROR_DISK_FULL: error = ENOSPC; break;
+	case ERROR_DRIVE_LOCKED: error = EBUSY; break;
+	case ERROR_ENVVAR_NOT_FOUND: error = EINVAL; break;
+	case ERROR_EXE_MARKED_INVALID: error = ENOEXEC; break;
+	case ERROR_FILENAME_EXCED_RANGE: error = ENAMETOOLONG; break;
+	case ERROR_FILE_EXISTS: error = EEXIST; break;
+	case ERROR_FILE_INVALID: error = ENODEV; break;
+	case ERROR_FILE_NOT_FOUND: error = ENOENT; break;
+	case ERROR_GEN_FAILURE: error = EIO; break;
+	case ERROR_HANDLE_DISK_FULL: error = ENOSPC; break;
+	case ERROR_INSUFFICIENT_BUFFER: error = ENOMEM; break;
+	case ERROR_INVALID_ACCESS: error = EACCES; break;
+	case ERROR_INVALID_ADDRESS: error = EFAULT; break;
+	case ERROR_INVALID_BLOCK: error = EFAULT; break;
+	case ERROR_INVALID_DATA: error = EINVAL; break;
+	case ERROR_INVALID_DRIVE: error = ENODEV; break;
+	case ERROR_INVALID_EXE_SIGNATURE: error = ENOEXEC; break;
+	case ERROR_INVALID_FLAGS: error = EINVAL; break;
+	case ERROR_INVALID_FUNCTION: error = ENOSYS; break;
+	case ERROR_INVALID_HANDLE: error = EBADF; break;
+	case ERROR_INVALID_LOGON_HOURS: error = EACCES; break;
+	case ERROR_INVALID_NAME: error = EINVAL; break;
+	case ERROR_INVALID_OWNER: error = EINVAL; break;
+	case ERROR_INVALID_PARAMETER: error = EINVAL; break;
+	case ERROR_INVALID_PASSWORD: error = EPERM; break;
+	case ERROR_INVALID_PRIMARY_GROUP: error = EINVAL; break;
+	case ERROR_INVALID_SIGNAL_NUMBER: error = EINVAL; break;
+	case ERROR_INVALID_TARGET_HANDLE: error = EIO; break;
+	case ERROR_INVALID_WORKSTATION: error = EACCES; break;
+	case ERROR_IO_DEVICE: error = EIO; break;
+	case ERROR_IO_INCOMPLETE: error = EINTR; break;
+	case ERROR_LOCKED: error = EBUSY; break;
+	case ERROR_LOCK_VIOLATION: error = EACCES; break;
+	case ERROR_LOGON_FAILURE: error = EACCES; break;
+	case ERROR_MAPPED_ALIGNMENT: error = EINVAL; break;
+	case ERROR_META_EXPANSION_TOO_LONG: error = E2BIG; break;
+	case ERROR_MORE_DATA: error = EPIPE; break;
+	case ERROR_NEGATIVE_SEEK: error = ESPIPE; break;
+	case ERROR_NOACCESS: error = EFAULT; break;
+	case ERROR_NONE_MAPPED: error = EINVAL; break;
+	case ERROR_NOT_ENOUGH_MEMORY: error = ENOMEM; break;
+	case ERROR_NOT_READY: error = EAGAIN; break;
+	case ERROR_NOT_SAME_DEVICE: error = EXDEV; break;
+	case ERROR_NO_DATA: error = EPIPE; break;
+	case ERROR_NO_MORE_SEARCH_HANDLES: error = EIO; break;
+	case ERROR_NO_PROC_SLOTS: error = EAGAIN; break;
+	case ERROR_NO_SUCH_PRIVILEGE: error = EACCES; break;
+	case ERROR_OPEN_FAILED: error = EIO; break;
+	case ERROR_OPEN_FILES: error = EBUSY; break;
+	case ERROR_OPERATION_ABORTED: error = EINTR; break;
+	case ERROR_OUTOFMEMORY: error = ENOMEM; break;
+	case ERROR_PASSWORD_EXPIRED: error = EACCES; break;
+	case ERROR_PATH_BUSY: error = EBUSY; break;
+	case ERROR_PATH_NOT_FOUND: error = ENOENT; break;
+	case ERROR_PIPE_BUSY: error = EBUSY; break;
+	case ERROR_PIPE_CONNECTED: error = EPIPE; break;
+	case ERROR_PIPE_LISTENING: error = EPIPE; break;
+	case ERROR_PIPE_NOT_CONNECTED: error = EPIPE; break;
+	case ERROR_PRIVILEGE_NOT_HELD: error = EACCES; break;
+	case ERROR_READ_FAULT: error = EIO; break;
+	case ERROR_SEEK: error = EIO; break;
+	case ERROR_SEEK_ON_DEVICE: error = ESPIPE; break;
+	case ERROR_SHARING_BUFFER_EXCEEDED: error = ENFILE; break;
+	case ERROR_SHARING_VIOLATION: error = EACCES; break;
+	case ERROR_STACK_OVERFLOW: error = ENOMEM; break;
+	case ERROR_SWAPERROR: error = ENOENT; break;
+	case ERROR_TOO_MANY_MODULES: error = EMFILE; break;
+	case ERROR_TOO_MANY_OPEN_FILES: error = EMFILE; break;
+	case ERROR_UNRECOGNIZED_MEDIA: error = ENXIO; break;
+	case ERROR_UNRECOGNIZED_VOLUME: error = ENODEV; break;
+	case ERROR_WAIT_NO_CHILDREN: error = ECHILD; break;
+	case ERROR_WRITE_FAULT: error = EIO; break;
+	case ERROR_WRITE_PROTECT: error = EROFS; break;
+	}
+	return error;
+}
 
 #undef open
 int mingw_open (const char *filename, int oflags, ...)
@@ -46,7 +160,8 @@ static int do_lstat(const char *file_name, struct stat *buf)
 		buf->st_uid = 0;
 		buf->st_nlink = 1;
 		buf->st_mode = file_attr_to_st_mode(fdata.dwFileAttributes);
-		buf->st_size = fdata.nFileSizeLow; /* Can't use nFileSizeHigh, since it's not a stat64 */
+		buf->st_size = fdata.nFileSizeLow |
+			(((off_t)fdata.nFileSizeHigh)<<32);
 		buf->st_dev = buf->st_rdev = 0; /* not used by Git */
 		buf->st_atime = filetime_to_time_t(&(fdata.ftLastAccessTime));
 		buf->st_mtime = filetime_to_time_t(&(fdata.ftLastWriteTime));
@@ -101,7 +216,7 @@ int mingw_fstat(int fd, struct stat *buf)
 	}
 	/* direct non-file handles to MS's fstat() */
 	if (GetFileType(fh) != FILE_TYPE_DISK)
-		return fstat(fd, buf);
+		return _fstati64(fd, buf);
 
 	if (GetFileInformationByHandle(fh, &fdata)) {
 		buf->st_ino = 0;
@@ -109,7 +224,8 @@ int mingw_fstat(int fd, struct stat *buf)
 		buf->st_uid = 0;
 		buf->st_nlink = 1;
 		buf->st_mode = file_attr_to_st_mode(fdata.dwFileAttributes);
-		buf->st_size = fdata.nFileSizeLow; /* Can't use nFileSizeHigh, since it's not a stat64 */
+		buf->st_size = fdata.nFileSizeLow |
+			(((off_t)fdata.nFileSizeHigh)<<32);
 		buf->st_dev = buf->st_rdev = 0; /* not used by Git */
 		buf->st_atime = filetime_to_time_t(&(fdata.ftLastAccessTime));
 		buf->st_mtime = filetime_to_time_t(&(fdata.ftLastWriteTime));
@@ -281,7 +397,7 @@ repeat:
 		 * its own input data to become available. But since
 		 * the process (pack-objects) is itself CPU intensive,
 		 * it will happily pick up the time slice that we are
-		 * relinguishing here.
+		 * relinquishing here.
 		 */
 		Sleep(0);
 		goto repeat;
@@ -342,7 +458,7 @@ static const char *quote_arg(const char *arg)
 	const char *p = arg;
 	if (!*p) force_quotes = 1;
 	while (*p) {
-		if (isspace(*p) || *p == '*' || *p == '?' || *p == '{')
+		if (isspace(*p) || *p == '*' || *p == '?' || *p == '{' || *p == '\'')
 			force_quotes = 1;
 		else if (*p == '"')
 			n++;
@@ -410,8 +526,8 @@ static const char *parse_interpreter(const char *cmd)
 	if (buf[0] != '#' || buf[1] != '!')
 		return NULL;
 	buf[n] = '\0';
-	p = strchr(buf, '\n');
-	if (!p)
+	p = buf + strcspn(buf, "\r\n");
+	if (!*p)
 		return NULL;
 
 	*p = '\0';
@@ -447,7 +563,7 @@ static char **get_path_split(void)
 	if (!n)
 		return NULL;
 
-	path = xmalloc((n+1)*sizeof(char*));
+	path = xmalloc((n+1)*sizeof(char *));
 	p = envpath;
 	i = 0;
 	do {
@@ -819,7 +935,9 @@ int mingw_connect(int sockfd, struct sockaddr *sa, size_t sz)
 #undef rename
 int mingw_rename(const char *pold, const char *pnew)
 {
-	DWORD attrs;
+	DWORD attrs, gle;
+	int tries = 0;
+	static const int delay[] = { 0, 1, 10, 20, 40 };
 
 	/*
 	 * Try native rename() first to get errno right.
@@ -829,10 +947,12 @@ int mingw_rename(const char *pold, const char *pnew)
 		return 0;
 	if (errno != EEXIST)
 		return -1;
+repeat:
 	if (MoveFileEx(pold, pnew, MOVEFILE_REPLACE_EXISTING))
 		return 0;
 	/* TODO: translate more errors */
-	if (GetLastError() == ERROR_ACCESS_DENIED &&
+	gle = GetLastError();
+	if (gle == ERROR_ACCESS_DENIED &&
 	    (attrs = GetFileAttributes(pnew)) != INVALID_FILE_ATTRIBUTES) {
 		if (attrs & FILE_ATTRIBUTE_DIRECTORY) {
 			errno = EISDIR;
@@ -842,9 +962,22 @@ int mingw_rename(const char *pold, const char *pnew)
 		    SetFileAttributes(pnew, attrs & ~FILE_ATTRIBUTE_READONLY)) {
 			if (MoveFileEx(pold, pnew, MOVEFILE_REPLACE_EXISTING))
 				return 0;
+			gle = GetLastError();
 			/* revert file attributes on failure */
 			SetFileAttributes(pnew, attrs);
 		}
+	}
+	if (tries < ARRAY_SIZE(delay) && gle == ERROR_ACCESS_DENIED) {
+		/*
+		 * We assume that some other process had the source or
+		 * destination file open at the wrong moment and retry.
+		 * In order to give the other process a higher chance to
+		 * complete its operation, we give up our time slice now.
+		 * If we have to retry again, we do sleep a bit.
+		 */
+		Sleep(delay[tries]);
+		tries++;
+		goto repeat;
 	}
 	errno = EACCES;
 	return -1;
@@ -1003,3 +1136,98 @@ void mingw_open_html(const char *unixpath)
 	printf("Launching default browser to display HTML ...\n");
 	ShellExecute(NULL, "open", htmlpath, NULL, "\\", 0);
 }
+
+int link(const char *oldpath, const char *newpath)
+{
+	typedef BOOL WINAPI (*T)(const char*, const char*, LPSECURITY_ATTRIBUTES);
+	static T create_hard_link = NULL;
+	if (!create_hard_link) {
+		create_hard_link = (T) GetProcAddress(
+			GetModuleHandle("kernel32.dll"), "CreateHardLinkA");
+		if (!create_hard_link)
+			create_hard_link = (T)-1;
+	}
+	if (create_hard_link == (T)-1) {
+		errno = ENOSYS;
+		return -1;
+	}
+	if (!create_hard_link(newpath, oldpath, NULL)) {
+		errno = err_win_to_posix(GetLastError());
+		return -1;
+	}
+	return 0;
+}
+
+char *getpass(const char *prompt)
+{
+	struct strbuf buf = STRBUF_INIT;
+
+	fputs(prompt, stderr);
+	for (;;) {
+		char c = _getch();
+		if (c == '\r' || c == '\n')
+			break;
+		strbuf_addch(&buf, c);
+	}
+	fputs("\n", stderr);
+	return strbuf_detach(&buf, NULL);
+}
+
+#ifndef NO_MINGW_REPLACE_READDIR
+/* MinGW readdir implementation to avoid extra lstats for Git */
+struct mingw_DIR
+{
+	struct _finddata_t	dd_dta;		/* disk transfer area for this dir */
+	struct mingw_dirent	dd_dir;		/* Our own implementation, including d_type */
+	long			dd_handle;	/* _findnext handle */
+	int			dd_stat; 	/* 0 = next entry to read is first entry, -1 = off the end, positive = 0 based index of next entry */
+	char			dd_name[1]; 	/* given path for dir with search pattern (struct is extended) */
+};
+
+struct dirent *mingw_readdir(DIR *dir)
+{
+	WIN32_FIND_DATAA buf;
+	HANDLE handle;
+	struct mingw_DIR *mdir = (struct mingw_DIR*)dir;
+
+	if (!dir->dd_handle) {
+		errno = EBADF; /* No set_errno for mingw */
+		return NULL;
+	}
+
+	if (dir->dd_handle == (long)INVALID_HANDLE_VALUE && dir->dd_stat == 0)
+	{
+		handle = FindFirstFileA(dir->dd_name, &buf);
+		DWORD lasterr = GetLastError();
+		dir->dd_handle = (long)handle;
+		if (handle == INVALID_HANDLE_VALUE && (lasterr != ERROR_NO_MORE_FILES)) {
+			errno = err_win_to_posix(lasterr);
+			return NULL;
+		}
+	} else if (dir->dd_handle == (long)INVALID_HANDLE_VALUE) {
+		return NULL;
+	} else if (!FindNextFileA((HANDLE)dir->dd_handle, &buf)) {
+		DWORD lasterr = GetLastError();
+		FindClose((HANDLE)dir->dd_handle);
+		dir->dd_handle = (long)INVALID_HANDLE_VALUE;
+		/* POSIX says you shouldn't set errno when readdir can't
+		   find any more files; so, if another error we leave it set. */
+		if (lasterr != ERROR_NO_MORE_FILES)
+			errno = err_win_to_posix(lasterr);
+		return NULL;
+	}
+
+	/* We get here if `buf' contains valid data.  */
+	strcpy(dir->dd_dir.d_name, buf.cFileName);
+	++dir->dd_stat;
+
+	/* Set file type, based on WIN32_FIND_DATA */
+	mdir->dd_dir.d_type = 0;
+	if (buf.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+		mdir->dd_dir.d_type |= DT_DIR;
+	else
+		mdir->dd_dir.d_type |= DT_REG;
+
+	return (struct dirent*)&dir->dd_dir;
+}
+#endif // !NO_MINGW_REPLACE_READDIR

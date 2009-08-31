@@ -7,6 +7,7 @@
 #include "unpack-trees.h"
 #include "progress.h"
 #include "refs.h"
+#include "attr.h"
 
 /*
  * Error messages expected by scripts out of plumbing commands such as
@@ -49,39 +50,20 @@ static void add_entry(struct unpack_trees_options *o, struct cache_entry *ce,
 	memcpy(new, ce, size);
 	new->next = NULL;
 	new->ce_flags = (new->ce_flags & ~clear) | set;
-	add_index_entry(&o->result, new, ADD_CACHE_OK_TO_ADD|ADD_CACHE_OK_TO_REPLACE|ADD_CACHE_SKIP_DFCHECK);
+	add_index_entry(&o->result, new, ADD_CACHE_OK_TO_ADD|ADD_CACHE_OK_TO_REPLACE);
 }
 
-/* Unlink the last component and attempt to remove leading
- * directories, in case this unlink is the removal of the
- * last entry in the directory -- empty directories are removed.
+/*
+ * Unlink the last component and schedule the leading directories for
+ * removal, such that empty directories get removed.
  */
 static void unlink_entry(struct cache_entry *ce)
 {
-	char *cp, *prev;
-	char *name = ce->name;
-
-	if (has_symlink_leading_path(ce_namelen(ce), ce->name))
+	if (has_symlink_or_noent_leading_path(ce->name, ce_namelen(ce)))
 		return;
-	if (unlink(name))
+	if (unlink_or_warn(ce->name))
 		return;
-	prev = NULL;
-	while (1) {
-		int status;
-		cp = strrchr(name, '/');
-		if (prev)
-			*prev = '/';
-		if (!cp)
-			break;
-
-		*cp = 0;
-		status = rmdir(name);
-		if (status) {
-			*cp = '/';
-			break;
-		}
-		prev = cp;
-	}
+	schedule_dir_for_removal(ce->name, ce_namelen(ce));
 }
 
 static struct checkout state;
@@ -105,6 +87,8 @@ static int check_updates(struct unpack_trees_options *o)
 		cnt = 0;
 	}
 
+	if (o->update)
+		git_attr_set_direction(GIT_ATTR_CHECKOUT, &o->result);
 	for (i = 0; i < index->cache_nr; i++) {
 		struct cache_entry *ce = index->cache[i];
 
@@ -112,11 +96,10 @@ static int check_updates(struct unpack_trees_options *o)
 			display_progress(progress, ++cnt);
 			if (o->update)
 				unlink_entry(ce);
-			remove_index_entry_at(&o->result, i);
-			i--;
-			continue;
 		}
 	}
+	remove_marked_cache_entries(&o->result);
+	remove_scheduled_dirs();
 
 	for (i = 0; i < index->cache_nr; i++) {
 		struct cache_entry *ce = index->cache[i];
@@ -130,6 +113,8 @@ static int check_updates(struct unpack_trees_options *o)
 		}
 	}
 	stop_progress(&progress);
+	if (o->update)
+		git_attr_set_direction(GIT_ATTR_CHECKIN, NULL);
 	return errs != 0;
 }
 
@@ -143,7 +128,7 @@ static inline int call_unpack_fn(struct cache_entry **src, struct unpack_trees_o
 
 static int unpack_index_entry(struct cache_entry *ce, struct unpack_trees_options *o)
 {
-	struct cache_entry *src[5] = { ce, };
+	struct cache_entry *src[5] = { ce, NULL, };
 
 	o->pos++;
 	if (ce_stage(ce)) {
@@ -155,7 +140,7 @@ static int unpack_index_entry(struct cache_entry *ce, struct unpack_trees_option
 	return call_unpack_fn(src, o);
 }
 
-int traverse_trees_recursive(int n, unsigned long dirmask, unsigned long df_conflicts, struct name_entry *names, struct traverse_info *info)
+static int traverse_trees_recursive(int n, unsigned long dirmask, unsigned long df_conflicts, struct name_entry *names, struct traverse_info *info)
 {
 	int i;
 	struct tree_desc t[MAX_UNPACK_TREES];
@@ -240,8 +225,11 @@ static struct cache_entry *create_ce_entry(const struct traverse_info *info, con
 	return ce;
 }
 
-static int unpack_nondirectories(int n, unsigned long mask, unsigned long dirmask, struct cache_entry *src[5],
-	const struct name_entry *names, const struct traverse_info *info)
+static int unpack_nondirectories(int n, unsigned long mask,
+				 unsigned long dirmask,
+				 struct cache_entry **src,
+				 const struct name_entry *names,
+				 const struct traverse_info *info)
 {
 	int i;
 	struct unpack_trees_options *o = info->data;
@@ -283,15 +271,15 @@ static int unpack_nondirectories(int n, unsigned long mask, unsigned long dirmas
 	if (o->merge)
 		return call_unpack_fn(src, o);
 
-	n += o->merge;
 	for (i = 0; i < n; i++)
-		add_entry(o, src[i], 0, 0);
+		if (src[i] && src[i] != o->df_conflict_entry)
+			add_entry(o, src[i], 0, 0);
 	return 0;
 }
 
 static int unpack_callback(int n, unsigned long mask, unsigned long dirmask, struct name_entry *names, struct traverse_info *info)
 {
-	struct cache_entry *src[5] = { NULL, };
+	struct cache_entry *src[MAX_UNPACK_TREES + 1] = { NULL, };
 	struct unpack_trees_options *o = info->data;
 	const struct name_entry *p = names;
 
@@ -338,6 +326,23 @@ static int unpack_callback(int n, unsigned long mask, unsigned long dirmask, str
 			if (src[0])
 				conflicts |= 1;
 		}
+
+		/* special case: "diff-index --cached" looking at a tree */
+		if (o->diff_index_cached &&
+		    n == 1 && dirmask == 1 && S_ISDIR(names->mode)) {
+			int matches;
+			matches = cache_tree_matches_traversal(o->src_index->cache_tree,
+							       names, info);
+			/*
+			 * Everything under the name matches.  Adjust o->pos to
+			 * skip the entire hierarchy.
+			 */
+			if (matches) {
+				o->pos += matches;
+				return mask;
+			}
+		}
+
 		if (traverse_trees_recursive(n, dirmask, conflicts,
 					     names, info) < 0)
 			return -1;
@@ -377,8 +382,10 @@ int unpack_trees(unsigned len, struct tree_desc *t, struct unpack_trees_options 
 
 	memset(&o->result, 0, sizeof(o->result));
 	o->result.initialized = 1;
-	if (o->src_index)
-		o->result.timestamp = o->src_index->timestamp;
+	if (o->src_index) {
+		o->result.timestamp.sec = o->src_index->timestamp.sec;
+		o->result.timestamp.nsec = o->src_index->timestamp.nsec;
+	}
 	o->merge_size = len;
 
 	if (!dfc)
@@ -443,7 +450,7 @@ static int verify_uptodate(struct cache_entry *ce,
 {
 	struct stat st;
 
-	if (o->index_only || o->reset)
+	if (o->index_only || o->reset || ce_uptodate(ce))
 		return 0;
 
 	if (!lstat(ce->name, &st)) {
@@ -494,7 +501,7 @@ static int verify_clean_subdirectory(struct cache_entry *ce, const char *action,
 	 * anything in the existing directory there.
 	 */
 	int namelen;
-	int pos, i;
+	int i;
 	struct dir_struct d;
 	char *pathbuf;
 	int cnt = 0;
@@ -515,24 +522,20 @@ static int verify_clean_subdirectory(struct cache_entry *ce, const char *action,
 	 * in that directory.
 	 */
 	namelen = strlen(ce->name);
-	pos = index_name_pos(o->src_index, ce->name, namelen);
-	if (0 <= pos)
-		return cnt; /* we have it as nondirectory */
-	pos = -pos - 1;
-	for (i = pos; i < o->src_index->cache_nr; i++) {
-		struct cache_entry *ce = o->src_index->cache[i];
-		int len = ce_namelen(ce);
+	for (i = o->pos; i < o->src_index->cache_nr; i++) {
+		struct cache_entry *ce2 = o->src_index->cache[i];
+		int len = ce_namelen(ce2);
 		if (len < namelen ||
-		    strncmp(ce->name, ce->name, namelen) ||
-		    ce->name[namelen] != '/')
+		    strncmp(ce->name, ce2->name, namelen) ||
+		    ce2->name[namelen] != '/')
 			break;
 		/*
-		 * ce->name is an entry in the subdirectory.
+		 * ce2->name is an entry in the subdirectory.
 		 */
-		if (!ce_stage(ce)) {
-			if (verify_uptodate(ce, o))
+		if (!ce_stage(ce2)) {
+			if (verify_uptodate(ce2, o))
 				return -1;
-			add_entry(o, ce, CE_REMOVE, 0);
+			add_entry(o, ce2, CE_REMOVE, 0);
 		}
 		cnt++;
 	}
@@ -548,7 +551,7 @@ static int verify_clean_subdirectory(struct cache_entry *ce, const char *action,
 	memset(&d, 0, sizeof(d));
 	if (o->dir)
 		d.exclude_per_dir = o->dir->exclude_per_dir;
-	i = read_directory(&d, ce->name, pathbuf, namelen+1, NULL);
+	i = read_directory(&d, pathbuf, namelen+1, NULL);
 	if (i)
 		return o->gently ? -1 :
 			error(ERRORMSG(o, not_uptodate_dir), ce->name);
@@ -584,11 +587,11 @@ static int verify_absent(struct cache_entry *ce, const char *action,
 	if (o->index_only || o->reset || !o->update)
 		return 0;
 
-	if (has_symlink_leading_path(ce_namelen(ce), ce->name))
+	if (has_symlink_or_noent_leading_path(ce->name, ce_namelen(ce)))
 		return 0;
 
 	if (!lstat(ce->name, &st)) {
-		int cnt;
+		int ret;
 		int dtype = ce_to_dtype(ce);
 		struct cache_entry *result;
 
@@ -616,13 +619,15 @@ static int verify_absent(struct cache_entry *ce, const char *action,
 			 * files that are in "foo/" we would lose
 			 * it.
 			 */
-			cnt = verify_clean_subdirectory(ce, action, o);
+			ret = verify_clean_subdirectory(ce, action, o);
+			if (ret < 0)
+				return ret;
 
 			/*
 			 * If this removed entries from the index,
 			 * what that means is:
 			 *
-			 * (1) the caller unpack_trees_rec() saw path/foo
+			 * (1) the caller unpack_callback() saw path/foo
 			 * in the index, and it has not removed it because
 			 * it thinks it is handling 'path' as blob with
 			 * D/F conflict;
@@ -635,7 +640,7 @@ static int verify_absent(struct cache_entry *ce, const char *action,
 			 * We need to increment it by the number of
 			 * deleted entries here.
 			 */
-			o->pos += cnt;
+			o->pos += ret;
 			return 0;
 		}
 
@@ -994,12 +999,12 @@ int oneway_merge(struct cache_entry **src, struct unpack_trees_options *o)
 		return error("Cannot do a oneway merge of %d trees",
 			     o->merge_size);
 
-	if (!a)
+	if (!a || a == o->df_conflict_entry)
 		return deleted_entry(old, old, o);
 
 	if (old && same(old, a)) {
 		int update = 0;
-		if (o->reset) {
+		if (o->reset && !ce_uptodate(old)) {
 			struct stat st;
 			if (lstat(old->name, &st) ||
 			    ie_match_stat(o->src_index, old, &st, CE_MATCH_IGNORE_VALID))

@@ -74,6 +74,10 @@ test_expect_success setup '
 	for i in 1 2; do echo $i; done >>dir/sub &&
 	git update-index file0 dir/sub &&
 
+	mkdir dir3 &&
+	cp dir/sub dir3/sub &&
+	test-chmtime +1 dir3/sub &&
+
 	git config log.showroot false &&
 	git commit --amend &&
 	git show-branch
@@ -97,8 +101,7 @@ do
 	'' | '#'*) continue ;;
 	esac
 	test=`echo "$cmd" | sed -e 's|[/ ][/ ]*|_|g'`
-	cnt=`expr $test_count + 1`
-	pfx=`printf "%04d" $cnt`
+	pfx=`printf "%04d" $test_count`
 	expect="$TEST_DIRECTORY/t4013/diff.$test"
 	actual="$pfx-diff.$test"
 
@@ -203,6 +206,10 @@ log --root -c --patch-with-stat --summary master
 log --root --cc --patch-with-stat --summary master
 log -SF master
 log -SF -p master
+log --decorate --all
+
+rev-list --parents HEAD
+rev-list --children HEAD
 
 whatchanged master
 whatchanged -p master
@@ -239,11 +246,12 @@ format-patch --stdout initial..master
 format-patch --stdout --no-numbered initial..master
 format-patch --stdout --numbered initial..master
 format-patch --attach --stdout initial..side
+format-patch --attach --stdout --suffix=.diff initial..side
 format-patch --attach --stdout initial..master^
 format-patch --attach --stdout initial..master
 format-patch --inline --stdout initial..side
 format-patch --inline --stdout initial..master^
-format-patch --inline --stdout initial..master
+format-patch --inline --stdout --numbered-files initial..master
 format-patch --inline --stdout initial..master
 format-patch --inline --stdout --subject-prefix=TESTCASE initial..master
 config format.subjectprefix DIFFERENT_PREFIX
@@ -261,7 +269,10 @@ diff --patch-with-stat -r initial..side
 diff --patch-with-raw -r initial..side
 diff --name-status dir2 dir
 diff --no-index --name-status dir2 dir
+diff --no-index --name-status -- dir2 dir
+diff --no-index dir dir3
 diff master master^ side
+diff --dirstat master~1 master~2
 EOF
 
 test_done

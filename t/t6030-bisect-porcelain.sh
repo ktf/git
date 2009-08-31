@@ -224,6 +224,31 @@ test_expect_success 'bisect skip: cannot tell between 2 commits' '
 	fi
 '
 
+# $HASH1 is good, $HASH4 is both skipped and bad, we skip $HASH3
+# and $HASH2 is good,
+# so we should not be able to tell the first bad commit
+# among $HASH3 and $HASH4
+test_expect_success 'bisect skip: with commit both bad and skipped' '
+	git bisect start &&
+	git bisect skip &&
+	git bisect bad &&
+	git bisect good $HASH1 &&
+	git bisect skip &&
+	if git bisect good > my_bisect_log.txt
+	then
+		echo Oops, should have failed.
+		false
+	else
+		test $? -eq 2 &&
+		grep "first bad commit could be any of" my_bisect_log.txt &&
+		! grep $HASH1 my_bisect_log.txt &&
+		! grep $HASH2 my_bisect_log.txt &&
+		grep $HASH3 my_bisect_log.txt &&
+		grep $HASH4 my_bisect_log.txt &&
+		git bisect reset
+	fi
+'
+
 # We want to automatically find the commit that
 # introduced "Another" into hello.
 test_expect_success \
@@ -457,28 +482,89 @@ test_expect_success 'good merge bases when good and bad are siblings' '
 	git bisect reset
 '
 
-check_trace() {
-	grep "$1" "$GIT_TRACE" | grep "\^$2" | grep "$3" >/dev/null
-}
-
 test_expect_success 'optimized merge base checks' '
-	GIT_TRACE="$(pwd)/trace.log" &&
-	export GIT_TRACE &&
 	git bisect start "$HASH7" "$SIDE_HASH7" > my_bisect_log.txt &&
 	grep "merge base must be tested" my_bisect_log.txt &&
 	grep "$HASH4" my_bisect_log.txt &&
-	check_trace "rev-list" "$HASH7" "$SIDE_HASH7" &&
 	git bisect good > my_bisect_log2.txt &&
 	test -f ".git/BISECT_ANCESTORS_OK" &&
 	test "$HASH6" = $(git rev-parse --verify HEAD) &&
-	: > "$GIT_TRACE" &&
 	git bisect bad > my_bisect_log3.txt &&
-	test_must_fail check_trace "rev-list" "$HASH6" "$SIDE_HASH7" &&
 	git bisect good "$A_HASH" > my_bisect_log4.txt &&
 	grep "merge base must be tested" my_bisect_log4.txt &&
-	test_must_fail test -f ".git/BISECT_ANCESTORS_OK" &&
-	check_trace "rev-list" "$HASH6" "$A_HASH" &&
-	unset GIT_TRACE
+	test_must_fail test -f ".git/BISECT_ANCESTORS_OK"
+'
+
+# This creates another side branch called "parallel" with some files
+# in some directories, to test bisecting with paths.
+#
+# We should have the following:
+#
+#    P1-P2-P3-P4-P5-P6-P7
+#   /        /        /
+# H1-H2-H3-H4-H5-H6-H7
+#            \  \     \
+#             S5-A     \
+#              \        \
+#               S6-S7----B
+#
+test_expect_success '"parallel" side branch creation' '
+	git bisect reset &&
+	git checkout -b parallel $HASH1 &&
+	mkdir dir1 dir2 &&
+	add_line_into_file "1(para): line 1 on parallel branch" dir1/file1 &&
+	PARA_HASH1=$(git rev-parse --verify HEAD) &&
+	add_line_into_file "2(para): line 2 on parallel branch" dir2/file2 &&
+	PARA_HASH2=$(git rev-parse --verify HEAD) &&
+	add_line_into_file "3(para): line 3 on parallel branch" dir2/file3 &&
+	PARA_HASH3=$(git rev-parse --verify HEAD)
+	git merge -m "merge HASH4 and PARA_HASH3" "$HASH4" &&
+	PARA_HASH4=$(git rev-parse --verify HEAD)
+	add_line_into_file "5(para): add line on parallel branch" dir1/file1 &&
+	PARA_HASH5=$(git rev-parse --verify HEAD)
+	add_line_into_file "6(para): add line on parallel branch" dir2/file2 &&
+	PARA_HASH6=$(git rev-parse --verify HEAD)
+	git merge -m "merge HASH7 and PARA_HASH6" "$HASH7" &&
+	PARA_HASH7=$(git rev-parse --verify HEAD)
+'
+
+test_expect_success 'restricting bisection on one dir' '
+	git bisect reset &&
+	git bisect start HEAD $HASH1 -- dir1 &&
+	para1=$(git rev-parse --verify HEAD) &&
+	test "$para1" = "$PARA_HASH1" &&
+	git bisect bad > my_bisect_log.txt &&
+	grep "$PARA_HASH1 is first bad commit" my_bisect_log.txt
+'
+
+test_expect_success 'restricting bisection on one dir and a file' '
+	git bisect reset &&
+	git bisect start HEAD $HASH1 -- dir1 hello &&
+	para4=$(git rev-parse --verify HEAD) &&
+	test "$para4" = "$PARA_HASH4" &&
+	git bisect bad &&
+	hash3=$(git rev-parse --verify HEAD) &&
+	test "$hash3" = "$HASH3" &&
+	git bisect good &&
+	hash4=$(git rev-parse --verify HEAD) &&
+	test "$hash4" = "$HASH4" &&
+	git bisect good &&
+	para1=$(git rev-parse --verify HEAD) &&
+	test "$para1" = "$PARA_HASH1" &&
+	git bisect good > my_bisect_log.txt &&
+	grep "$PARA_HASH4 is first bad commit" my_bisect_log.txt
+'
+
+test_expect_success 'skipping away from skipped commit' '
+	git bisect start $PARA_HASH7 $HASH1 &&
+	para4=$(git rev-parse --verify HEAD) &&
+	test "$para4" = "$PARA_HASH4" &&
+        git bisect skip &&
+	hash7=$(git rev-parse --verify HEAD) &&
+	test "$hash7" = "$HASH7" &&
+        git bisect skip &&
+	para3=$(git rev-parse --verify HEAD) &&
+	test "$para3" = "$PARA_HASH3"
 '
 
 #

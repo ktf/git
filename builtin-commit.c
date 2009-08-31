@@ -88,13 +88,13 @@ static struct option builtin_commit_options[] = {
 	OPT__VERBOSE(&verbose),
 	OPT_GROUP("Commit message options"),
 
-	OPT_STRING('F', "file", &logfile, "FILE", "read log from file"),
+	OPT_FILENAME('F', "file", &logfile, "read log from file"),
 	OPT_STRING(0, "author", &force_author, "AUTHOR", "override author for commit"),
 	OPT_CALLBACK('m', "message", &message, "MESSAGE", "specify commit message", opt_parse_m),
 	OPT_STRING('c', "reedit-message", &edit_message, "COMMIT", "reuse and edit message from specified commit "),
 	OPT_STRING('C', "reuse-message", &use_message, "COMMIT", "reuse message from specified commit"),
 	OPT_BOOLEAN('s', "signoff", &signoff, "add Signed-off-by:"),
-	OPT_STRING('t', "template", &template_file, "FILE", "use specified template file"),
+	OPT_FILENAME('t', "template", &template_file, "use specified template file"),
 	OPT_BOOLEAN('e', "edit", &edit_flag, "force edit of commit"),
 
 	OPT_GROUP("Commit contents options"),
@@ -166,7 +166,7 @@ static int list_paths(struct string_list *list, const char *with_tree,
 		struct cache_entry *ce = active_cache[i];
 		if (ce->ce_flags & CE_UPDATE)
 			continue;
-		if (!pathspec_match(pattern, m, ce->name, 0))
+		if (!match_pathspec(pattern, ce->name, ce_namelen(ce), 0, m))
 			continue;
 		string_list_insert(ce->name, list);
 	}
@@ -224,7 +224,8 @@ static char *prepare_index(int argc, const char **argv, const char *prefix)
 	const char **pathspec = NULL;
 
 	if (interactive) {
-		interactive_add(argc, argv, prefix);
+		if (interactive_add(argc, argv, prefix) != 0)
+			die("interactive add failed");
 		if (read_cache_preload(NULL) < 0)
 			die("index file corrupt");
 		commit_style = COMMIT_AS_IS;
@@ -361,40 +362,6 @@ static int run_status(FILE *fp, const char *index_file, const char *prefix, int 
 	return s.commitable;
 }
 
-static int run_hook(const char *index_file, const char *name, ...)
-{
-	struct child_process hook;
-	const char *argv[10], *env[2];
-	char index[PATH_MAX];
-	va_list args;
-	int i;
-
-	va_start(args, name);
-	argv[0] = git_path("hooks/%s", name);
-	i = 0;
-	do {
-		if (++i >= ARRAY_SIZE(argv))
-			die ("run_hook(): too many arguments");
-		argv[i] = va_arg(args, const char *);
-	} while (argv[i]);
-	va_end(args);
-
-	snprintf(index, sizeof(index), "GIT_INDEX_FILE=%s", index_file);
-	env[0] = index;
-	env[1] = NULL;
-
-	if (access(argv[0], X_OK) < 0)
-		return 0;
-
-	memset(&hook, 0, sizeof(hook));
-	hook.argv = argv;
-	hook.no_stdin = 1;
-	hook.stdout_to_stderr = 1;
-	hook.env = env;
-
-	return run_command(&hook);
-}
-
 static int is_a_merge(const unsigned char *sha1)
 {
 	struct commit *commit = lookup_commit(sha1);
@@ -467,12 +434,12 @@ static int prepare_to_commit(const char *index_file, const char *prefix)
 		if (isatty(0))
 			fprintf(stderr, "(reading log message from standard input)\n");
 		if (strbuf_read(&sb, 0, 0) < 0)
-			die("could not read log from standard input");
+			die_errno("could not read log from standard input");
 		hook_arg1 = "message";
 	} else if (logfile) {
 		if (strbuf_read_file(&sb, logfile, 0) < 0)
-			die("could not read log file '%s': %s",
-			    logfile, strerror(errno));
+			die_errno("could not read log file '%s'",
+				  logfile);
 		hook_arg1 = "message";
 	} else if (use_message) {
 		buffer = strstr(use_message_buffer, "\n\n");
@@ -483,16 +450,15 @@ static int prepare_to_commit(const char *index_file, const char *prefix)
 		hook_arg2 = use_message;
 	} else if (!stat(git_path("MERGE_MSG"), &statbuf)) {
 		if (strbuf_read_file(&sb, git_path("MERGE_MSG"), 0) < 0)
-			die("could not read MERGE_MSG: %s", strerror(errno));
+			die_errno("could not read MERGE_MSG");
 		hook_arg1 = "merge";
 	} else if (!stat(git_path("SQUASH_MSG"), &statbuf)) {
 		if (strbuf_read_file(&sb, git_path("SQUASH_MSG"), 0) < 0)
-			die("could not read SQUASH_MSG: %s", strerror(errno));
+			die_errno("could not read SQUASH_MSG");
 		hook_arg1 = "squash";
 	} else if (template_file && !stat(template_file, &statbuf)) {
 		if (strbuf_read_file(&sb, template_file, 0) < 0)
-			die("could not read %s: %s",
-			    template_file, strerror(errno));
+			die_errno("could not read '%s'", template_file);
 		hook_arg1 = "template";
 	}
 
@@ -505,8 +471,7 @@ static int prepare_to_commit(const char *index_file, const char *prefix)
 
 	fp = fopen(git_path(commit_editmsg), "w");
 	if (fp == NULL)
-		die("could not open %s: %s",
-		    git_path(commit_editmsg), strerror(errno));
+		die_errno("could not open '%s'", git_path(commit_editmsg));
 
 	if (cleanup_mode != CLEANUP_NONE)
 		stripspace(&sb, 0);
@@ -530,7 +495,7 @@ static int prepare_to_commit(const char *index_file, const char *prefix)
 	}
 
 	if (fwrite(sb.buf, 1, sb.len, fp) < sb.len)
-		die("could not write commit template: %s", strerror(errno));
+		die_errno("could not write commit template");
 
 	strbuf_release(&sb);
 
@@ -595,7 +560,6 @@ static int prepare_to_commit(const char *index_file, const char *prefix)
 		commitable = run_status(fp, index_file, prefix, 1);
 		wt_status_use_color = saved_color_setting;
 	} else {
-		struct rev_info rev;
 		unsigned char sha1[20];
 		const char *parent = "HEAD";
 
@@ -607,16 +571,8 @@ static int prepare_to_commit(const char *index_file, const char *prefix)
 
 		if (get_sha1(parent, sha1))
 			commitable = !!active_nr;
-		else {
-			init_revisions(&rev, "");
-			rev.abbrev = 0;
-			setup_revisions(0, NULL, &rev, parent);
-			DIFF_OPT_SET(&rev.diffopt, QUIET);
-			DIFF_OPT_SET(&rev.diffopt, EXIT_WITH_STATUS);
-			run_diff_index(&rev, 1 /* cached */);
-
-			commitable = !!DIFF_OPT_TST(&rev.diffopt, HAS_CHANGES);
-		}
+		else
+			commitable = index_differs_from(parent, 0);
 	}
 
 	fclose(fp);
@@ -624,7 +580,6 @@ static int prepare_to_commit(const char *index_file, const char *prefix)
 	if (!commitable && !in_merge && !allow_empty &&
 	    !(amend && is_a_merge(head_sha1))) {
 		run_status(stdout, index_file, prefix, 0);
-		unlink(commit_editmsg);
 		return 0;
 	}
 
@@ -740,9 +695,8 @@ static int parse_and_validate_options(int argc, const char *argv[],
 {
 	int f = 0;
 
-	argc = parse_options(argc, argv, builtin_commit_options, usage, 0);
-	logfile = parse_options_fix_filename(prefix, logfile);
-	template_file = parse_options_fix_filename(prefix, template_file);
+	argc = parse_options(argc, argv, prefix, builtin_commit_options, usage,
+			     0);
 
 	if (force_author && !strchr(force_author, '>'))
 		force_author = find_author_by_nickname(force_author);
@@ -866,6 +820,9 @@ int cmd_status(int argc, const char **argv, const char *prefix)
 	if (wt_status_use_color == -1)
 		wt_status_use_color = git_use_color_default;
 
+	if (diff_use_color_default == -1)
+		diff_use_color_default = git_use_color_default;
+
 	argc = parse_and_validate_options(argc, argv, builtin_status_usage, prefix);
 
 	index_file = prepare_index(argc, argv, prefix);
@@ -881,7 +838,7 @@ static void print_summary(const char *prefix, const unsigned char *sha1)
 {
 	struct rev_info rev;
 	struct commit *commit;
-	static const char *format = "format:%h: \"%s\"";
+	static const char *format = "format:%h] %s";
 	unsigned char junk_sha1[20];
 	const char *head = resolve_ref("HEAD", junk_sha1, 0, NULL);
 
@@ -908,7 +865,7 @@ static void print_summary(const char *prefix, const unsigned char *sha1)
 	rev.diffopt.break_opt = 0;
 	diff_setup_done(&rev.diffopt);
 
-	printf("[%s%s]: created ",
+	printf("[%s%s ",
 		!prefixcmp(head, "refs/heads/") ?
 			head + 11 :
 			!strcmp(head, "HEAD") ?
@@ -945,6 +902,9 @@ int cmd_commit(int argc, const char **argv, const char *prefix)
 
 	git_config(git_commit_config, NULL);
 
+	if (wt_status_use_color == -1)
+		wt_status_use_color = git_use_color_default;
+
 	argc = parse_and_validate_options(argc, argv, builtin_commit_usage, prefix);
 
 	index_file = prepare_index(argc, argv, prefix);
@@ -978,8 +938,8 @@ int cmd_commit(int argc, const char **argv, const char *prefix)
 		pptr = &commit_list_insert(lookup_commit(head_sha1), pptr)->next;
 		fp = fopen(git_path("MERGE_HEAD"), "r");
 		if (fp == NULL)
-			die("could not open %s for reading: %s",
-			    git_path("MERGE_HEAD"), strerror(errno));
+			die_errno("could not open '%s' for reading",
+				  git_path("MERGE_HEAD"));
 		while (strbuf_getline(&m, fp, '\n') != EOF) {
 			unsigned char sha1[20];
 			if (get_sha1_hex(m.buf, sha1) < 0)
@@ -990,8 +950,7 @@ int cmd_commit(int argc, const char **argv, const char *prefix)
 		strbuf_release(&m);
 		if (!stat(git_path("MERGE_MODE"), &statbuf)) {
 			if (strbuf_read_file(&sb, git_path("MERGE_MODE"), 0) < 0)
-				die("could not read MERGE_MODE: %s",
-						strerror(errno));
+				die_errno("could not read MERGE_MODE");
 			if (!strcmp(sb.buf, "no-ff"))
 				allow_fast_forward = 0;
 		}
@@ -1005,8 +964,9 @@ int cmd_commit(int argc, const char **argv, const char *prefix)
 	/* Finally, get the commit message */
 	strbuf_reset(&sb);
 	if (strbuf_read_file(&sb, git_path(commit_editmsg), 0) < 0) {
+		int saved_errno = errno;
 		rollback_index_files();
-		die("could not read commit message");
+		die("could not read commit message: %s", strerror(saved_errno));
 	}
 
 	/* Truncate the message just before the diff, if any. */

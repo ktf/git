@@ -171,7 +171,7 @@ test_expect_success 'checkout to detach HEAD' '
 	git checkout -f renamer && git clean -f &&
 	git checkout renamer^ 2>messages &&
 	(cat >messages.expect <<EOF
-Note: moving to "renamer^" which isn'"'"'t a local branch
+Note: moving to '\''renamer^'\'' which isn'\''t a local branch
 If you want to create a new branch from this checkout, you may do so
 (now or later) by using -b with the checkout command again. Example:
   git checkout -b <new_branch_name>
@@ -532,6 +532,14 @@ test_expect_success 'failing checkout -b should not break working tree' '
 	git diff --exit-code &&
 	git diff --cached --exit-code
 
+'
+
+test_expect_success 'switch out of non-branch' '
+	git reset --hard master &&
+	git checkout master^0 &&
+	echo modified >one &&
+	test_must_fail git checkout renamer 2>error.log &&
+	! grep "^Previous HEAD" error.log
 '
 
 test_done

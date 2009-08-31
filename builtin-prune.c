@@ -5,6 +5,7 @@
 #include "builtin.h"
 #include "reachable.h"
 #include "parse-options.h"
+#include "dir.h"
 
 static const char * const prune_usage[] = {
 	"git prune [-n] [-v] [--expire <time>] [--] [<head>...]",
@@ -26,7 +27,7 @@ static int prune_tmp_object(const char *path, const char *filename)
 	}
 	printf("Removing stale temporary file %s\n", fullpath);
 	if (!show_only)
-		unlink(fullpath);
+		unlink_or_warn(fullpath);
 	return 0;
 }
 
@@ -46,7 +47,7 @@ static int prune_object(char *path, const char *filename, const unsigned char *s
 		       (type > 0) ? typename(type) : "unknown");
 	}
 	if (!show_only)
-		unlink(fullpath);
+		unlink_or_warn(fullpath);
 	return 0;
 }
 
@@ -61,19 +62,12 @@ static int prune_dir(int i, char *path)
 	while ((de = readdir(dir)) != NULL) {
 		char name[100];
 		unsigned char sha1[20];
-		int len = strlen(de->d_name);
 
-		switch (len) {
-		case 2:
-			if (de->d_name[1] != '.')
-				break;
-		case 1:
-			if (de->d_name[0] != '.')
-				break;
+		if (is_dot_or_dotdot(de->d_name))
 			continue;
-		case 38:
+		if (strlen(de->d_name) == 38) {
 			sprintf(name, "%02x", i);
-			memcpy(name+2, de->d_name, len+1);
+			memcpy(name+2, de->d_name, 39);
 			if (get_sha1_hex(name, sha1) < 0)
 				break;
 
@@ -148,7 +142,7 @@ int cmd_prune(int argc, const char **argv, const char *prefix)
 	save_commit_buffer = 0;
 	init_revisions(&revs, prefix);
 
-	argc = parse_options(argc, argv, options, prune_usage, 0);
+	argc = parse_options(argc, argv, prefix, options, prune_usage, 0);
 	while (argc--) {
 		unsigned char sha1[20];
 		const char *name = *argv++;

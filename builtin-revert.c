@@ -60,7 +60,7 @@ static void parse_args(int argc, const char **argv)
 		OPT_END(),
 	};
 
-	if (parse_options(argc, argv, options, usage_str, 0) != 1)
+	if (parse_options(argc, argv, NULL, options, usage_str, 0) != 1)
 		usage_with_options(usage_str, options);
 	arg = argv[0];
 
@@ -135,7 +135,7 @@ static void add_to_msg(const char *string)
 {
 	int len = strlen(string);
 	if (write_in_full(msg_fd, string, len) < 0)
-		die ("Could not write to MERGE_MSG");
+		die_errno ("Could not write to MERGE_MSG");
 }
 
 static void add_message_to_msg(const char *message)
@@ -223,17 +223,6 @@ static char *help_msg(const unsigned char *sha1)
 	return helpbuf;
 }
 
-static int index_is_dirty(void)
-{
-	struct rev_info rev;
-	init_revisions(&rev, NULL);
-	setup_revisions(0, NULL, &rev, "HEAD");
-	DIFF_OPT_SET(&rev.diffopt, QUIET);
-	DIFF_OPT_SET(&rev.diffopt, EXIT_WITH_STATUS);
-	run_diff_index(&rev, 1);
-	return !!DIFF_OPT_TST(&rev.diffopt, HAS_CHANGES);
-}
-
 static struct tree *empty_tree(void)
 {
 	struct tree *tree = xcalloc(1, sizeof(struct tree));
@@ -279,7 +268,7 @@ static int revert_or_cherry_pick(int argc, const char **argv)
 	} else {
 		if (get_sha1("HEAD", head))
 			die ("You do not have a valid HEAD");
-		if (index_is_dirty())
+		if (index_differs_from("HEAD", 0))
 			die ("Dirty index: cannot %s", me);
 	}
 	discard_cache();
@@ -334,9 +323,9 @@ static int revert_or_cherry_pick(int argc, const char **argv)
 
 	encoding = get_encoding(message);
 	if (!encoding)
-		encoding = "utf-8";
+		encoding = "UTF-8";
 	if (!git_commit_encoding)
-		git_commit_encoding = "utf-8";
+		git_commit_encoding = "UTF-8";
 	if ((reencoded_message = reencode_string(message,
 					git_commit_encoding, encoding)))
 		message = reencoded_message;
@@ -387,6 +376,7 @@ static int revert_or_cherry_pick(int argc, const char **argv)
 	    (write_cache(index_fd, active_cache, active_nr) ||
 	     commit_locked_index(&index_lock)))
 		die("%s: Unable to write new index file", me);
+	rollback_lock_file(&index_lock);
 
 	if (!clean) {
 		add_to_msg("\nConflicts:\n\n");

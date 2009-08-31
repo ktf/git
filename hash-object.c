@@ -8,6 +8,7 @@
 #include "blob.h"
 #include "quote.h"
 #include "parse-options.h"
+#include "exec_cmd.h"
 
 static void hash_fd(int fd, const char *type, int write_object, const char *path)
 {
@@ -28,7 +29,7 @@ static void hash_object(const char *path, const char *type, int write_object,
 	int fd;
 	fd = open(path, O_RDONLY);
 	if (fd < 0)
-		die("Cannot open %s", path);
+		die_errno("Cannot open '%s'", path);
 	hash_fd(fd, type, write_object, vpath);
 }
 
@@ -81,9 +82,10 @@ int main(int argc, const char **argv)
 
 	type = blob_type;
 
-	git_config(git_default_config, NULL);
+	git_extract_argv0_path(argv[0]);
 
-	argc = parse_options(argc, argv, hash_object_options, hash_object_usage, 0);
+	argc = parse_options(argc, argv, NULL, hash_object_options,
+			     hash_object_usage, 0);
 
 	if (write_object) {
 		prefix = setup_git_directory();
@@ -91,6 +93,8 @@ int main(int argc, const char **argv)
 		if (vpath && prefix)
 			vpath = prefix_filename(prefix, prefix_length, vpath);
 	}
+
+	git_config(git_default_config, NULL);
 
 	if (stdin_paths) {
 		if (hashstdin)

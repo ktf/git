@@ -246,6 +246,25 @@ int utf8_width(const char **start, size_t *remainder_p)
 	return git_wcwidth(ch);
 }
 
+/*
+ * Returns the total number of columns required by a null-terminated
+ * string, assuming that the string is utf8.  Returns strlen() instead
+ * if the string does not look like a valid utf8 string.
+ */
+int utf8_strwidth(const char *string)
+{
+	int width = 0;
+	const char *orig = string;
+
+	while (1) {
+		if (!string)
+			return strlen(orig);
+		if (!*string)
+			return width;
+		width += utf8_width(&string, NULL);
+	}
+}
+
 int is_utf8(const char *text)
 {
 	while (*text) {
@@ -335,7 +354,7 @@ int is_encoding_utf8(const char *name)
  * with iconv.  If the conversion fails, returns NULL.
  */
 #ifndef NO_ICONV
-#ifdef OLD_ICONV
+#if defined(OLD_ICONV) || (defined(__sun__) && !defined(_XPG6))
 	typedef const char * iconv_ibp;
 #else
 	typedef char * iconv_ibp;

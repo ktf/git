@@ -23,6 +23,7 @@
  */
 
 #include "cache.h"
+#include "exec_cmd.h"
 #ifdef NO_OPENSSL
 typedef void *SSL;
 #endif
@@ -115,9 +116,9 @@ static int nfvasprintf(char **strp, const char *fmt, va_list ap)
 
 	len = vsnprintf(tmp, sizeof(tmp), fmt, ap);
 	if (len < 0)
-		die("Fatal: Out of memory\n");
+		die("Fatal: Out of memory");
 	if (len >= sizeof(tmp))
-		die("imap command overflow !\n");
+		die("imap command overflow!");
 	*strp = xmemdupz(tmp, len);
 	return len;
 }
@@ -134,6 +135,7 @@ struct imap_server_conf {
 	char *pass;
 	int use_ssl;
 	int ssl_verify;
+	int use_html;
 };
 
 struct imap_store_conf {
@@ -236,7 +238,7 @@ static const char *Flags[] = {
 #ifndef NO_OPENSSL
 static void ssl_socket_perror(const char *func)
 {
-	fprintf(stderr, "%s: %s\n", func, ERR_error_string(ERR_get_error(), 0));
+	fprintf(stderr, "%s: %s\n", func, ERR_error_string(ERR_get_error(), NULL));
 }
 #endif
 
@@ -482,7 +484,7 @@ static int nfsnprintf(char *buf, int blen, const char *fmt, ...)
 
 	va_start(va, fmt);
 	if (blen <= 0 || (unsigned)(ret = vsnprintf(buf, blen, fmt, va)) >= (unsigned)blen)
-		die("Fatal: buffer too small. Please report a bug.\n");
+		die("Fatal: buffer too small. Please report a bug.");
 	va_end(va);
 	return ret;
 }
@@ -577,7 +579,7 @@ static struct imap_cmd *v_issue_imap_cmd(struct imap_store *ctx,
 			n = socket_write(&imap->buf.sock, cmd->cb.data, cmd->cb.dlen);
 			free(cmd->cb.data);
 			if (n != cmd->cb.dlen ||
-			    (n = socket_write(&imap->buf.sock, "\r\n", 2)) != 2) {
+			    socket_write(&imap->buf.sock, "\r\n", 2) != 2) {
 				free(cmd->cmd);
 				free(cmd);
 				return NULL;
@@ -980,9 +982,7 @@ static struct store *imap_open_store(struct imap_server_conf *srvc)
 	struct imap_store *ctx;
 	struct imap *imap;
 	char *arg, *rsp;
-	struct hostent *he;
-	struct sockaddr_in addr;
-	int s, a[2], preauth;
+	int s = -1, a[2], preauth;
 	pid_t pid;
 
 	ctx = xcalloc(sizeof(*ctx), 1);
@@ -1019,6 +1019,51 @@ static struct store *imap_open_store(struct imap_server_conf *srvc)
 
 		imap_info("ok\n");
 	} else {
+#ifndef NO_IPV6
+		struct addrinfo hints, *ai0, *ai;
+		int gai;
+		char portstr[6];
+
+		snprintf(portstr, sizeof(portstr), "%hu", srvc->port);
+
+		memset(&hints, 0, sizeof(hints));
+		hints.ai_socktype = SOCK_STREAM;
+		hints.ai_protocol = IPPROTO_TCP;
+
+		imap_info("Resolving %s... ", srvc->host);
+		gai = getaddrinfo(srvc->host, portstr, &hints, &ai);
+		if (gai) {
+			fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(gai));
+			goto bail;
+		}
+		imap_info("ok\n");
+
+		for (ai0 = ai; ai; ai = ai->ai_next) {
+			char addr[NI_MAXHOST];
+
+			s = socket(ai->ai_family, ai->ai_socktype,
+				   ai->ai_protocol);
+			if (s < 0)
+				continue;
+
+			getnameinfo(ai->ai_addr, ai->ai_addrlen, addr,
+				    sizeof(addr), NULL, 0, NI_NUMERICHOST);
+			imap_info("Connecting to [%s]:%s... ", addr, portstr);
+
+			if (connect(s, ai->ai_addr, ai->ai_addrlen) < 0) {
+				close(s);
+				s = -1;
+				perror("connect");
+				continue;
+			}
+
+			break;
+		}
+		freeaddrinfo(ai0);
+#else /* NO_IPV6 */
+		struct hostent *he;
+		struct sockaddr_in addr;
+
 		memset(&addr, 0, sizeof(addr));
 		addr.sin_port = htons(srvc->port);
 		addr.sin_family = AF_INET;
@@ -1038,7 +1083,12 @@ static struct store *imap_open_store(struct imap_server_conf *srvc)
 		imap_info("Connecting to %s:%hu... ", inet_ntoa(addr.sin_addr), ntohs(addr.sin_port));
 		if (connect(s, (struct sockaddr *)&addr, sizeof(addr))) {
 			close(s);
+			s = -1;
 			perror("connect");
+		}
+#endif
+		if (s < 0) {
+			fputs("Error: unable to connect to server.\n", stderr);
 			goto bail;
 		}
 
@@ -1262,6 +1312,53 @@ static int imap_store_msg(struct store *gctx, struct msg_data *data, int *uid)
 	return DRV_OK;
 }
 
+static void encode_html_chars(struct strbuf *p)
+{
+	int i;
+	for (i = 0; i < p->len; i++) {
+		if (p->buf[i] == '&')
+			strbuf_splice(p, i, 1, "&amp;", 5);
+		if (p->buf[i] == '<')
+			strbuf_splice(p, i, 1, "&lt;", 4);
+		if (p->buf[i] == '>')
+			strbuf_splice(p, i, 1, "&gt;", 4);
+		if (p->buf[i] == '"')
+			strbuf_splice(p, i, 1, "&quot;", 6);
+	}
+}
+static void wrap_in_html(struct msg_data *msg)
+{
+	struct strbuf buf = STRBUF_INIT;
+	struct strbuf **lines;
+	struct strbuf **p;
+	static char *content_type = "Content-Type: text/html;\n";
+	static char *pre_open = "<pre>\n";
+	static char *pre_close = "</pre>\n";
+	int added_header = 0;
+
+	strbuf_attach(&buf, msg->data, msg->len, msg->len);
+	lines = strbuf_split(&buf, '\n');
+	strbuf_release(&buf);
+	for (p = lines; *p; p++) {
+		if (! added_header) {
+			if ((*p)->len == 1 && *((*p)->buf) == '\n') {
+				strbuf_addstr(&buf, content_type);
+				strbuf_addbuf(&buf, *p);
+				strbuf_addstr(&buf, pre_open);
+				added_header = 1;
+				continue;
+			}
+		}
+		else
+			encode_html_chars(*p);
+		strbuf_addbuf(&buf, *p);
+	}
+	strbuf_addstr(&buf, pre_close);
+	strbuf_list_free(lines);
+	msg->len  = buf.len;
+	msg->data = strbuf_detach(&buf, NULL);
+}
+
 #define CHUNKSIZE 0x1000
 
 static int read_message(FILE *f, struct msg_data *msg)
@@ -1338,6 +1435,7 @@ static struct imap_server_conf server = {
 	NULL,	/* pass */
 	0,   	/* use_ssl */
 	1,   	/* ssl_verify */
+	0,   	/* use_html */
 };
 
 static char *imap_folder;
@@ -1376,6 +1474,8 @@ static int git_imap_config(const char *key, const char *val, void *cb)
 		server.tunnel = xstrdup(val);
 	else if (!strcmp("sslverify", key))
 		server.ssl_verify = git_config_bool(key, val);
+	else if (!strcmp("preformattedHTML", key))
+		server.use_html = git_config_bool(key, val);
 	return 0;
 }
 
@@ -1388,6 +1488,8 @@ int main(int argc, char **argv)
 	int r;
 	int total, n = 0;
 	int nongit_ok;
+
+	git_extract_argv0_path(argv[0]);
 
 	/* init the random number generator */
 	arc4_init();
@@ -1436,6 +1538,8 @@ int main(int argc, char **argv)
 		fprintf(stderr, "%4u%% (%d/%d) done\r", percent, n, total);
 		if (!split_msg(&all_msgs, &msg, &ofs))
 			break;
+		if (server.use_html)
+			wrap_in_html(&msg);
 		r = imap_store_msg(ctx, &msg, &uid);
 		if (r != DRV_OK)
 			break;

@@ -1,5 +1,6 @@
 #include "cache.h"
 #include "tag.h"
+#include "exec_cmd.h"
 
 /*
  * A signature file has a very simple fixed format: four lines
@@ -157,12 +158,14 @@ int main(int argc, char **argv)
 	unsigned char result_sha1[20];
 
 	if (argc != 1)
-		usage("git-mktag < signaturefile");
+		usage("git mktag < signaturefile");
+
+	git_extract_argv0_path(argv[0]);
 
 	setup_git_directory();
 
 	if (strbuf_read(&buf, 0, 4096) < 0) {
-		die("could not read from stdin");
+		die_errno("could not read from stdin");
 	}
 
 	/* Verify it for some basic sanity: it needs to start with

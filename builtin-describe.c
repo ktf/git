@@ -158,7 +158,7 @@ static void display_name(struct commit_name *n)
 		n->tag = lookup_tag(n->sha1);
 		if (!n->tag || parse_tag(n->tag) || !n->tag->tag)
 			die("annotated tag %s not available", n->path);
-		if (strcmp(n->tag->tag, n->path))
+		if (strcmp(n->tag->tag, all ? n->path + 5 : n->path))
 			warning("tag '%s' is really '%s' here", n->tag->tag, n->path);
 	}
 
@@ -322,7 +322,7 @@ int cmd_describe(int argc, const char **argv, const char *prefix)
 		OPT_END(),
 	};
 
-	argc = parse_options(argc, argv, options, describe_usage, 0);
+	argc = parse_options(argc, argv, prefix, options, describe_usage, 0);
 	if (max_candidates < 0)
 		max_candidates = 0;
 	else if (max_candidates > MAX_TAGS)
@@ -334,7 +334,7 @@ int cmd_describe(int argc, const char **argv, const char *prefix)
 		die("--long is incompatible with --abbrev=0");
 
 	if (contains) {
-		const char **args = xmalloc((7 + argc) * sizeof(char*));
+		const char **args = xmalloc((7 + argc) * sizeof(char *));
 		int i = 0;
 		args[i++] = "name-rev";
 		args[i++] = "--name-only";
@@ -349,7 +349,7 @@ int cmd_describe(int argc, const char **argv, const char *prefix)
 				args[i++] = s;
 			}
 		}
-		memcpy(args + i, argv, argc * sizeof(char*));
+		memcpy(args + i, argv, argc * sizeof(char *));
 		args[i + argc] = NULL;
 		return cmd_name_rev(i + argc, args, prefix);
 	}
